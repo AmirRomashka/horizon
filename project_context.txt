@@ -1,0 +1,1536 @@
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: .env
+============================================================
+
+TOKEN=8646683364:AAH4h9h0Nj-GdCB3Jsp5bzvIepATkWloxlw
+DB_URL=postgresql+asyncpg://postgres:8246@localhost:5432/horizon_db
+
+developer_id = 7664613285
+
+
+SHOP_ID=1120211
+SECRET_KEY=live_Z1SDVoiZu3ReXqg6AK9xcLrXlf31jAXieDM4vEHPZ94
+
+============================================================
+ПУТЬ К ФАЙЛУ: bot_instance.py
+============================================================
+
+# bot_instance.py
+from aiogram import Bot
+
+# Создаем переменную для хранения экземпляра бота
+_bot_instance = None
+
+def set_bot_instance(bot: Bot):
+    """Установить экземпляр бота"""
+    global _bot_instance
+    _bot_instance = bot
+
+def get_bot_instance() -> Bot:
+    """Получить экземпляр бота"""
+    if _bot_instance is None:
+        raise RuntimeError("Bot instance not initialized. Call set_bot_instance() first.")
+    return _bot_instance
+
+============================================================
+ПУТЬ К ФАЙЛУ: config.py
+============================================================
+
+# config.py
+from typing import Dict, List
+from pathlib import Path
+
+# Get work path 
+WORK_DIR = Path.cwd()
+
+# Global variables should be typed and have clear names
+last_message_dict: Dict[int, List[int]] = {}
+
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: main.py
+============================================================
+
+# main.py
+import os
+import asyncio
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv()) 
+
+from handlers.developer.developer_router import DeveloperRouter  
+
+from aiogram import Dispatcher, Bot 
+from aiogram.client.default import DefaultBotProperties  
+from aiogram.enums.parse_mode import ParseMode 
+
+from database.engine import create_db, drop_db, session_maker 
+
+from middlewares.db import DataBaseSession 
+
+from handlers.start import StartRouter 
+from handlers.admin.admin_router import AdminRouter
+from handlers.user.user_router import UserRouter 
+import bot_instance 
+from config import ADMIN_IDS
+
+
+
+# ======================================================================
+# INITIALIZATION
+# ======================================================================
+
+# Initialize bot
+bot = Bot(
+    token=os.getenv("TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
+# Initialize dispatcher
+dp = Dispatcher()
+
+
+# Include routers
+dp.include_router(DeveloperRouter)
+dp.include_router(StartRouter)
+dp.include_router(AdminRouter)
+dp.include_router(UserRouter)
+
+
+# Сохраняем бота в синглтоне
+bot_instance.set_bot_instance(bot)
+all_user_id = []
+
+
+
+# ======================================================================
+# STARTUP/SHUTDOWN HANDLERS
+# ======================================================================
+
+async def on_startup(bot):
+    """Initialize database on bot startup"""
+    run_param = True   # Set to True to reset database
+    if run_param:
+        await drop_db()
+
+    await create_db()
+    print("✅ Database initialized")
+
+
+async def on_shutdown(bot: Bot):
+    """Cleanup on bot shutdown"""
+    print("❌ Bot stopped")
+
+
+# ======================================================================
+# SCHEDULED TASKS SETUP
+# ======================================================================
+
+
+# ======================================================================
+# MAIN BOT POLLING FUNCTION
+# ======================================================================
+
+async def polling_bot():
+    """Main function to start the bot"""
+
+    # Register startup/shutdown handlers
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # Add database middleware
+    dp.update.middleware(DataBaseSession(session_pool=session_maker))
+
+    # Start polling
+    await bot.delete_webhook(
+        drop_pending_updates=True,
+    )
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+
+# ======================================================================
+# ENTRY POINT
+# ======================================================================
+
+if __name__ == "__main__":
+    asyncio.run(polling_bot())
+
+============================================================
+ПУТЬ К ФАЙЛУ: requirements.txt
+============================================================
+
+Ошибка при чтении файла requirements.txt: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
+
+============================================================
+ПУТЬ К ФАЙЛУ: tools.py
+============================================================
+
+# tools.py
+
+import re
+from functools import wraps
+from typing import Callable, Dict, List, Optional, Tuple, Union, TypeVar
+from icecream import ic
+from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto
+from aiogram.enums.parse_mode import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+
+from config import last_message_dict
+from bot_instance import get_bot_instance
+from keybords.inline import get_callback_btns
+
+
+# =============================================================================
+# УПРАВЛЕНИЕ СООБЩЕНИЯМИ
+# =============================================================================
+
+async def message_delete(user_id: int, last_message: dict = last_message_dict):
+    """Удаляет все сообщения пользователя из истории."""
+    bot = get_bot_instance()
+    for msg_id in last_message.get(user_id, []):
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=msg_id)
+        except Exception as e:
+            ic(e)
+    last_message_dict[user_id] = []
+
+
+async def send_clean_message(
+    target: Union[Message, CallbackQuery],
+    text: str,
+    buttons: Optional[Dict[str, str]] = None,
+    sizes: Optional[List[int]] = None,
+    parse_mode: Optional[str] = ParseMode.HTML,
+    photo: Optional[Union[str, FSInputFile]] = None,
+    edit: bool = False
+) -> Message:
+    """Отправляет сообщение с управлением историей."""
+    user_id = target.from_user.id
+    
+    reply_markup = None
+    if buttons:
+        sizes_tuple = tuple(sizes) if sizes else (1,)
+        reply_markup = get_callback_btns(btns=buttons, sizes=sizes_tuple)
+    
+    try:
+        if edit and isinstance(target, CallbackQuery):
+            if photo:
+                media = InputMediaPhoto(media=photo, caption=text, parse_mode=parse_mode)
+                msg = await target.message.edit_media(media=media, reply_markup=reply_markup)
+            else:
+                msg = await target.message.edit_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            await target.answer()
+        else:
+            if isinstance(target, CallbackQuery):
+                msg = await target.message.answer_photo(photo, caption=text, reply_markup=reply_markup, parse_mode=parse_mode) if photo \
+                    else await target.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                await target.answer()
+            else:
+                msg = await target.answer_photo(photo, caption=text, reply_markup=reply_markup, parse_mode=parse_mode) if photo \
+                    else await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        
+        await message_delete(user_id)
+        
+        if user_id not in last_message_dict:
+            last_message_dict[user_id] = []
+        last_message_dict[user_id].append(msg.message_id)
+        
+        return msg
+        
+    except TelegramBadRequest as e:
+        ic(f"Telegram error: {e}")
+        msg = await (target.message.answer if isinstance(target, CallbackQuery) else target.answer)(
+            text=text, reply_markup=reply_markup, parse_mode=parse_mode
+        )
+        last_message_dict.setdefault(user_id, []).append(msg.message_id)
+        return msg
+
+
+# =============================================================================
+# ПАРСИНГ CALLBACK
+# =============================================================================
+
+class CallbackParser:
+    """Универсальный парсер callback данных."""
+    
+    def __init__(self, call: CallbackQuery):
+        self.data = call.data
+        self._numbers = None
+    
+    @property
+    def numbers(self) -> List[int]:
+        """Кэшированный список всех чисел в callback."""
+        if self._numbers is None:
+            self._numbers = [int(p) for p in self.data.split("_") if p.isdigit()]
+        return self._numbers
+    
+    def get_id(self, prefix: Optional[str] = None, position: Optional[int] = None) -> Optional[int]:
+        """
+        Получает ID из callback.
+        
+        - prefix: ищет первое число после префикса
+        - position: берет число по индексу из списка всех чисел
+        - если ничего не указано: возвращает первое число
+        """
+        if prefix:
+            if not self.data.startswith(prefix):
+                return None
+            match = re.search(r'\d+', self.data[len(prefix):])
+            return int(match.group()) if match else None
+        
+        if position is not None:
+            return self.numbers[position] if position < len(self.numbers) else None
+        
+        return self.numbers[0] if self.numbers else None
+    
+    def get_ids(self, count: int) -> List[Optional[int]]:
+        """Возвращает первые count ID."""
+        return [self.numbers[i] if i < len(self.numbers) else None for i in range(count)]
+    
+    def matches(self, prefix: str) -> bool:
+        """Проверяет начало callback."""
+        return self.data.startswith(prefix)
+    
+    def validate(self, prefix: str, count: int = 1) -> Tuple[Union[int, List[int], None], Optional[str]]:
+        """Проверяет callback и возвращает ID или ошибку."""
+        if not self.matches(prefix):
+            return None, f"❌ Неверный формат: ожидался {prefix}"
+        
+        if len(self.numbers) < count:
+            return None, f"❌ Недостаточно данных. Ожидается {count} ID, получено {len(self.numbers)}"
+        
+        return self.numbers[0] if count == 1 else self.numbers[:count], None
+
+
+def parse_callback(
+    call: CallbackQuery,
+    expected_prefix: Optional[str] = None, 
+    expected_count: int = 1                 
+) -> Tuple[Union[int, List[int], None], Optional[str]]:
+    """Быстрый парсинг callback с валидацией."""
+    parser = CallbackParser(call)
+    
+    if expected_prefix:
+        return parser.validate(expected_prefix, expected_count)
+    
+    numbers = parser.numbers
+    if len(numbers) < expected_count:
+        return None, f"❌ Недостаточно данных. Ожидается {expected_count} ID, получено {len(numbers)}"
+    
+    return numbers[0] if expected_count == 1 else numbers[:expected_count], None
+def safe_id(call: CallbackQuery, prefix: Optional[str] = None) -> Optional[int]:
+    """Безопасно получает первый ID (без ошибок)."""
+    return CallbackParser(call).get_id(prefix=prefix)
+
+
+# =============================================================================
+# ДЕКОРАТОР ДЛЯ CALLBACK
+# =============================================================================
+
+T = TypeVar('T')
+
+def validate_callback(
+    prefix: Optional[str] = None,
+    count: int = 1,
+    alert: bool = True
+):
+    """
+    Декоратор для автоматической валидации callback.
+    
+    Пример:
+        @validate_callback("admin_dish_")
+        async def handler(call, state, session, id):
+            ...
+        
+        @validate_callback("dish_in_cart_", count=2)
+        async def handler(call, session, ids):
+            dish_id, item_id = ids
+            ...
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(call: CallbackQuery, *args, **kwargs):
+            result, error = parse_callback(call, prefix, count)
+            
+            if error:
+                if alert:
+                    await call.answer(error, show_alert=True)
+                ic(f"Callback error: {error} | data: {call.data}")
+                return
+            
+            if count == 1:
+                return await func(call, *args, **kwargs, id=result)
+            return await func(call, *args, **kwargs, ids=result)
+        
+        return wrapper
+    return decorator
+
+# tools.py (добавить в конец файла)
+
+# =============================================================================
+# УВЕДОМЛЕНИЯ АДМИНИСТРАТОРОВ
+# =============================================================================
+
+async def notify_admins(
+    bot,
+    text: str,
+    admin_ids: List[int],
+    buttons: Optional[Dict[str, str]] = None,
+    sizes: Optional[List[int]] = None,
+    parse_mode: str = ParseMode.HTML
+) -> None:
+    """
+    Отправляет уведомление всем администраторам.
+    Использует send_clean_message для автоматической очистки старых сообщений.
+    
+    Args:
+        bot: экземпляр бота
+        text: текст уведомления
+        admin_ids: список ID администраторов
+        buttons: кнопки (опционально)
+        sizes: размеры кнопок (опционально)
+        parse_mode: режим парсинга
+    """
+    for admin_id in admin_ids:
+        try:
+            # Создаём фейковый объект Message для send_clean_message
+            # (чтобы использовать существующую логику очистки)
+            class FakeMessage:
+                def __init__(self, user_id, bot):
+                    self.from_user = type('obj', (object,), {'id': user_id})
+                    self.bot = bot
+                
+                async def answer(self, *args, **kwargs):
+                    return await bot.send_message(chat_id=self.from_user.id, *args, **kwargs)
+                
+                async def answer_photo(self, *args, **kwargs):
+                    return await bot.send_photo(chat_id=self.from_user.id, *args, **kwargs)
+            
+            fake_message = FakeMessage(admin_id, bot)
+            
+            await send_clean_message(
+                target=fake_message,
+                text=text,
+                buttons=buttons,
+                sizes=sizes,
+                parse_mode=parse_mode
+            )
+            
+        except Exception as e:
+            ic(f"Error notifying admin {admin_id}: {e}")
+
+# tools.py (добавить)
+
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: Yookassa.py
+============================================================
+
+import os
+import uuid
+import asyncio
+from decimal import Decimal
+from typing import Optional
+
+from icecream import ic
+from sqlalchemy.ext.asyncio import AsyncSession
+from yookassa import Configuration, Payment
+
+from database.orm_query import get_balance_orm, update_balance_orm
+from config import bot
+from keybords.inline import get_callback_btns
+
+# ======================================================================
+# YOOKASSA CONFIGURATION
+# ======================================================================
+
+# Configure Yookassa credentials
+Configuration.account_id = os.getenv("SHOP_ID")
+Configuration.secret_key = os.getenv("SECRET_KEY")
+
+# ======================================================================
+# PAYMENT FUNCTIONS
+# ======================================================================
+
+def create_payment(value: int, user_id: int, phone_user : str) -> Payment:
+    """
+    Create a new payment in Yookassa
+    Args:
+        value: Amount in RUB
+        user_id: Telegram user ID
+    
+    Returns:
+        Yookassa Payment object
+    """
+    payment_request = {
+    "amount": {
+        "value": str(value),
+        "currency": "RUB"
+    },
+    "confirmation": {
+        "type": "redirect",
+        "return_url": "https://web.telegram.org/a/#7814537542"
+    },
+    "description": "Пополнение кошелька QuickHire",
+    "capture": True,
+    "metadata": {"user_id": user_id},
+    "receipt": {
+        "customer": {
+            "phone": f"{phone_user}"  # Обязательно (или phone)
+        },
+        "items": [
+            {
+                "description": "Пополнение баланса QuickHire",
+                "quantity": "1",
+                "amount": {
+                    "value": str(value),
+                    "currency": "RUB"
+                },
+                "vat_code": "1",  # НДС 20%
+                "payment_mode": "full_payment",
+                "payment_subject": "service"
+            }
+        ]
+    }
+}
+    
+    # Generate unique idempotency key
+    idempotency_key = str(uuid.uuid4())
+    
+    payment = Payment.create(payment_request, idempotency_key)
+    ic(f"Created payment: {payment.id} with status: {payment.status}")
+    
+    return payment
+
+async def check_payment_status(
+    payment_id: str, 
+    user_id: int, 
+    session: AsyncSession,
+    max_attempts: int = 60,
+    check_interval: int = 10
+) -> Optional[dict]:
+    """
+    Check payment status with retry logic
+    Args:
+        payment_id: Yookassa payment ID
+        user_id: Telegram user ID
+        session: Async database session
+        max_attempts: Maximum number of check attempts
+        check_interval: Interval between checks in seconds
+    
+    Returns:
+        Message object or None if payment failed
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Get payment status from Yookassa
+            response = Payment.find_one(payment_id)
+            ic(f"Attempt {attempt}: Payment status - {response.status}")
+            
+            if response.status == "succeeded":
+                # Process successful payment
+                amount = int(Decimal(str(response.amount.value)))
+                ic(f"Processing payment for user {user_id}, amount: {amount} RUB")
+                
+                # Update user balance
+                current_balance = await get_balance_orm(
+                    user_id=user_id, 
+                    session=session
+                )
+                new_balance = current_balance[-1] + amount
+                
+                await update_balance_orm(
+                    user_id=user_id,
+                    new_balance=new_balance,
+                    session=session
+                )
+                
+                # Notify user
+                return await bot.send_message(
+                    user_id,
+                    f"✅ Платеж на {amount} RUB подтвержден!\n"
+                    f"Ваш баланс: {new_balance}\n"
+                    "/start"
+                )
+                
+            elif response.status in ['canceled', 'waiting_for_capture']:
+                # Handle non-successful statuses
+                return await bot.send_message(
+                    user_id,
+                    f"⚠️ Статус платежа: {response.status}\n"
+                    "/start"
+                )
+                
+        except Exception as e:
+            ic(f"Payment check error (attempt {attempt}): {str(e)}")
+            # Log full error for debugging
+            # Consider adding proper error logging here
+            
+        # Wait before next check
+        await asyncio.sleep(check_interval)
+    
+    # Max attempts reached
+    return await bot.send_message(
+        user_id,
+        "❌ Не удалось подтвердить платеж\n"
+        "/start"
+    )
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\engine.py
+============================================================
+
+import os 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from .models.base_model import Base
+
+engine = create_async_engine(os.getenv("DB_URL"), echo = True)
+
+session_maker = async_sessionmaker(bind = engine, class_ = AsyncSession, expire_on_commit = False)
+
+
+async def create_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+async def drop_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\host_enum.py
+============================================================
+
+# database/enumerate/host_enum.py
+from enum import Enum
+
+
+class HostStatus(str, Enum):
+    """Статусы хостов (серверов 3x-ui)"""
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    MAINTENANCE = "maintenance"
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        """Возвращает список всех значений статусов"""
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        """Проверяет, существует ли такой статус"""
+        return value in cls.get_all_values()
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\payment_enum.py
+============================================================
+
+# database/enumerate/payment_enum.py
+from enum import Enum
+
+
+class PaymentStatus(str, Enum):
+    """Статусы платежей"""
+    PENDING = "pending"      # Ожидает оплаты
+    PAID = "paid"            # Оплачен
+    FAILED = "failed"        # Ошибка оплаты
+    REFUNDED = "refunded"    # Возвращен
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+
+class PaymentSystem(str, Enum):
+    """Платежные системы"""
+    STARS = "stars"          # Telegram Stars
+    YOOKASSA = "yookassa"    # ЮKassa
+    CRYPTOMUS = "cryptomus"  # Cryptomus
+    MANUAL = "manual"        # Ручное зачисление
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [system.value for system in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\promocode_enum.py
+============================================================
+
+# database/enumerate/promocode_enum.py
+from enum import Enum
+
+
+class PromocodeDiscountType(str, Enum):
+    """Типы скидок промокодов"""
+    PERCENT = "percent"    # Процентная скидка
+    FIXED = "fixed"        # Фиксированная скидка (в валюте)
+    DAYS = "days"          # Добавление бесплатных дней
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [type_.value for type_ in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+
+class PromocodeStatus(str, Enum):
+    """Статусы промокодов"""
+    ACTIVE = "active"      # Активен
+    EXPIRED = "expired"    # Просрочен
+    DISABLED = "disabled"  # Отключен вручную
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\rate_enum.py
+============================================================
+
+# database/enumerate/rate_enum.py
+from enum import Enum
+
+
+class RateStatus(str, Enum):
+    """Статусы тарифных планов"""
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\subscription_enum.py
+============================================================
+
+# database/enumerate/subscription_enum.py
+from enum import Enum
+
+
+class SubscriptionStatus(str, Enum):
+    """Статусы подписок"""
+    ACTIVE = "active"        # Активна
+    EXPIRED = "expired"      # Истекла
+    BLOCKED = "blocked"      # Заблокирована
+    LIMITED = "limited"      # Лимит трафика исчерпан
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        return value in cls.get_all_values()
+
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\enumerate\user_enum.py
+============================================================
+
+# database/enumerate/user_enum.py
+from enum import Enum
+
+
+class UserStatus(str, Enum):
+    """Статусы пользователей бота"""
+    USER = "user"
+    ADMIN = "admin"
+    BANNED = "banned"
+
+    @classmethod
+    def get_all_values(cls) -> list:
+        """Возвращает список всех значений статусов"""
+        return [status.value for status in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        """Проверяет, существует ли такой статус"""
+        return value in cls.get_all_values()
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\base_model.py
+============================================================
+
+from datetime import datetime
+from sqlalchemy import DateTime
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
+from sqlalchemy.sql import func
+
+class Base(DeclarativeBase):
+
+    """Base model with common columns"""
+
+    created: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=func.now(),
+        nullable=False
+    )
+    updated: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\host_model.py
+============================================================
+
+# database/models/host_model.py
+from sqlalchemy import String, Integer, Boolean, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.models.base_model import Base
+from database.enumerate.host_enum import HostStatus
+
+
+class Hosts(Base):
+    __tablename__ = "hosts"
+
+    host_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    api_url: Mapped[str] = mapped_column(String(255), nullable=False)
+    username: Mapped[str] = mapped_column(String(100), nullable=False)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    inbound_id: Mapped[int] = mapped_column(Integer, default=1)
+    location: Mapped[str] = mapped_column(String(100), nullable=True)
+    status: Mapped[HostStatus] = mapped_column(String(20), default=HostStatus.ACTIVE)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_clients: Mapped[int] = mapped_column(Integer, default=100)
+    current_clients: Mapped[int] = mapped_column(Integer, default=0)
+
+    def __repr__(self) -> str:
+        return f"<Hosts(host_id={self.host_id}, name={self.name}, status={self.status.value})>"
+
+    def is_available(self) -> bool:
+        """Синхронная проверка доступности хоста"""
+        return (
+            self.status == HostStatus.ACTIVE 
+            and self.is_active 
+            and self.current_clients < self.max_clients
+        )
+
+    def is_under_maintenance(self) -> bool:
+        return self.status == HostStatus.MAINTENANCE
+
+    def get_api_base_url(self) -> str:
+        """Возвращает базовый URL для API запросов"""
+        base = self.api_url.rstrip('/')
+        return f"{base}/panel/api"
+
+    def get_login_url(self) -> str:
+        """URL для авторизации в API"""
+        return f"{self.get_api_base_url()}/login"
+
+    def get_inbounds_url(self) -> str:
+        """URL для получения списка inbound"""
+        return f"{self.get_api_base_url()}/inbounds"
+
+    def get_add_client_url(self) -> str:
+        """URL для добавления клиента"""
+        return f"{self.get_api_base_url()}/inbounds/addClient"
+
+    def get_client_traffic_url(self, client_uuid: str) -> str:
+        """URL для получения трафика клиента по UUID"""
+        return f"{self.get_api_base_url()}/inbounds/getClientTraffics/{client_uuid}"
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\payment_model.py
+============================================================
+
+# database/models/payment_model.py
+from sqlalchemy import String, ForeignKey, BigInteger, Float, Integer, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.models.base_model import Base
+from database.enumerate.payment_enum import PaymentStatus, PaymentSystem
+
+
+class Payments(Base):
+    __tablename__ = "payments"
+
+    payment_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False
+    )
+    rate_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("rates.rate_id", ondelete="RESTRICT"),
+        nullable=False
+    )
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[PaymentStatus] = mapped_column(
+        String(20),
+        default=PaymentStatus.PENDING
+    )
+    payment_system: Mapped[PaymentSystem] = mapped_column(
+        String(20),
+        nullable=False
+    )
+    # Для YooKassa
+    external_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=True
+    )
+    confirmation_url: Mapped[str] = mapped_column(
+        Text,
+        nullable=True
+    )
+    # Для Telegram Stars
+    telegram_payment_charge_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<Payments(payment_id={self.payment_id}, user_id={self.user_id}, rate_id={self.rate_id}, amount={self.amount}, status={self.status.value}, payment_system={self.payment_system.value})>"
+
+    def is_pending(self) -> bool:
+        return self.status == PaymentStatus.PENDING
+
+    def is_paid(self) -> bool:
+        return self.status == PaymentStatus.PAID
+
+    def mark_as_paid(self) -> None:
+        self.status = PaymentStatus.PAID
+
+    def mark_as_failed(self) -> None:
+        self.status = PaymentStatus.FAILED
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\promocode_model.py
+============================================================
+
+# database/models/promocode_model.py
+from sqlalchemy import String, Integer, DateTime, Float, BigInteger
+from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+
+from database.models.base_model import Base
+from database.enumerate.promocode_enum import PromocodeDiscountType, PromocodeStatus
+
+
+class Promocodes(Base):
+    __tablename__ = "promocodes"
+
+    promocode_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    discount_type: Mapped[PromocodeDiscountType] = mapped_column(String(20), nullable=False)
+    discount_value: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[PromocodeStatus] = mapped_column(String(20), default=PromocodeStatus.ACTIVE)
+    uses_left: Mapped[int] = mapped_column(Integer, default=1)
+    min_price: Mapped[float] = mapped_column(Float, default=0.0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[int] = mapped_column(BigInteger, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<Promocodes(code={self.code}, discount_type={self.discount_type.value}, discount_value={self.discount_value}, status={self.status.value}, uses_left={self.uses_left})>"
+
+    def is_active(self) -> bool:
+        if self.status != PromocodeStatus.ACTIVE:
+            return False
+        if self.uses_left <= 0:
+            return False
+        if self.expires_at and self.expires_at < datetime.now():
+            return False
+        return True
+
+    def can_apply_to_price(self, price: float) -> bool:
+        return price >= self.min_price
+
+    def calculate_discount(self, original_price: float, original_days: int) -> tuple:
+        new_price = original_price
+        new_days = original_days
+
+        if self.discount_type == PromocodeDiscountType.PERCENT:
+            new_price = original_price * (1 - self.discount_value / 100)
+        elif self.discount_type == PromocodeDiscountType.FIXED:
+            new_price = max(0, original_price - self.discount_value)
+        elif self.discount_type == PromocodeDiscountType.DAYS:
+            new_days = original_days + self.discount_value
+
+        return round(new_price, 2), new_days
+
+    def use(self) -> None:
+        if self.uses_left > 0:
+            self.uses_left -= 1
+        if self.uses_left == 0:
+            self.status = PromocodeStatus.EXPIRED
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\promocode_rate_model.py
+============================================================
+
+# database/models/promocode_rate_model.py
+from sqlalchemy import Integer, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.models.base_model import Base
+
+
+class PromocodeRates(Base):
+    __tablename__ = "promocode_rates"
+
+    promocode_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("promocodes.promocode_id", ondelete="CASCADE"),
+        primary_key=True
+    )
+    rate_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("rates.rate_id", ondelete="CASCADE"),
+        primary_key=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<PromocodeRates(promocode_id={self.promocode_id}, rate_id={self.rate_id})>"
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\rate_model.py
+============================================================
+
+# database/models/rate_model.py
+from sqlalchemy import String, Integer, Float
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.models.base_model import Base
+from database.enumerate.rate_enum import RateStatus
+
+
+class Rates(Base):
+    __tablename__ = "rates"
+
+    rate_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    days: Mapped[int] = mapped_column(Integer, nullable=False)
+    traffic_limit_gb: Mapped[int] = mapped_column(Integer, default=0)  # 0 = безлимит
+    status: Mapped[RateStatus] = mapped_column(
+        String(20),
+        default=RateStatus.ACTIVE
+    )
+
+    def __repr__(self) -> str:
+        return f"<Rates(rate_id={self.rate_id}, name={self.name}, price={self.price}, days={self.days}, traffic_limit_gb={self.traffic_limit_gb}, status={self.status.value})>"
+
+    def is_unlimited(self) -> bool:
+        """Проверка, безлимитный ли тариф"""
+        return self.traffic_limit_gb == 0
+
+    def is_available(self) -> bool:
+        """Проверка, доступен ли тариф для покупки"""
+        return self.status == RateStatus.ACTIVE
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\subscription_model.py
+============================================================
+
+# database/models/subscription_model.py
+from sqlalchemy import String, ForeignKey, BigInteger, Text, Integer
+from sqlalchemy.orm import Mapped, mapped_column
+from uuid import uuid4
+
+from database.models.base_model import Base
+from database.enumerate.subscription_enum import SubscriptionStatus
+
+
+class Subscriptions(Base):
+    __tablename__ = "subscriptions"
+
+    sub_id: Mapped[str] = mapped_column(
+        String(36), 
+        primary_key=True, 
+        default=lambda: str(uuid4())
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False
+    )
+    host_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        nullable=False
+    )
+    rate_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("rates.rate_id", ondelete="RESTRICT"),
+        nullable=False
+    )
+    vless_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[SubscriptionStatus] = mapped_column(
+        String(50),  # достаточно места для любых будущих статусов
+        default=SubscriptionStatus.ACTIVE
+    )
+
+    def __repr__(self) -> str:
+        return f"<Subscriptions(sub_id={self.sub_id}, user_id={self.user_id}, rate_id={self.rate_id}, status={self.status.value}, host_id={self.host_id})>"
+
+    def is_active(self) -> bool:
+        return self.status == SubscriptionStatus.ACTIVE
+
+    def is_expired(self) -> bool:
+        return self.status == SubscriptionStatus.EXPIRED
+
+    def is_blocked(self) -> bool:
+        return self.status == SubscriptionStatus.BLOCKED
+
+    def is_limited(self) -> bool:
+        return self.status == SubscriptionStatus.LIMITED
+
+============================================================
+ПУТЬ К ФАЙЛУ: database\models\user_model.py
+============================================================
+
+# database/models/user_model.py
+from sqlalchemy import BigInteger, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.models.base_model import Base
+from database.enumerate.user_enum import UserStatus
+
+
+class Users(Base):
+    __tablename__ = "users"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, 
+        primary_key=True, 
+        autoincrement=False
+    )
+    status: Mapped[UserStatus] = mapped_column(
+        String(20), 
+        default=UserStatus.USER
+    )
+
+    def __repr__(self) -> str:
+        return f"<BotUser(tg_id={self.tg_id}, status={self.status.value})>"
+
+    def is_admin(self) -> bool:
+        """Проверка, является ли пользователь администратором"""
+        return self.status == UserStatus.ADMIN
+
+    def is_banned(self) -> bool:
+        """Проверка, заблокирован ли пользователь"""
+        return self.status == UserStatus.BANNED
+
+    def is_user(self) -> bool:
+        """Проверка, является ли пользователь обычным"""
+        return self.status == UserStatus.USER
+
+============================================================
+ПУТЬ К ФАЙЛУ: handlers\start.py
+============================================================
+
+from typing import Union
+from aiogram import F, Router, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import FSInputFile
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+from keybords.inline import get_callback_btns
+from States import user_states
+from config import WORK_DIR, last_message_dict
+from tools import message_delete
+
+StartRouter = Router()
+
+
+# =============================================================================
+# HANDLERS
+# =============================================================================
+
+@StartRouter.message(Command("start"))
+@StartRouter.callback_query(F.data == "start")
+async def start(event: Union[types.Message, types.CallbackQuery], 
+                state: FSMContext, 
+                session: AsyncSession):
+
+    if isinstance(event, types.Message):
+        message = event
+    else:
+        message = event.message
+        await event.answer()
+
+    await state.clear()
+    await state.set_state(user_states.StartState.start)
+    
+    start_text = """
+    Hello everyone!
+"""
+    msg = await message.answer(text = start_text)
+        
+    await message_delete(event.from_user.id, last_message_dict)
+    last_message_dict[event.from_user.id].extend([msg.message_id])
+        
+    if isinstance(event, types.Message):
+        await event.delete()
+
+============================================================
+ПУТЬ К ФАЙЛУ: handlers\admin\admin_router.py
+============================================================
+
+"""
+Admin Router Module
+===================
+
+This module serves as the central entry point for all admin-related routers.
+All admin functionality is imported and registered here for clean organization.
+
+Module Structure:
+-----------------
+1. Delivery Management - Dates, statuses, and address zones
+2. Mailing System - Broadcast messages to users
+3. Menu Management - Categories and dishes CRUD
+4. Order Management - Processing and tracking orders
+5. Main Panel - Admin dashboard and navigation
+6. Promotion Management - Seasonal and special offers
+7. Admin Registration - Secret admin access
+8. Statistics - Revenue and order analytics
+9. Settings - System configuration
+10. Help - Documentation and support
+
+Usage:
+------
+The AdminRouter is imported in main.py and included in the dispatcher.
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+from aiogram import Router
+
+# -----------------------------------------------------------------------------
+# Admin Modules
+# -----------------------------------------------------------------------------
+
+# =============================================================================
+# ROUTER INITIALIZATION
+# =============================================================================
+
+AdminRouter = Router(name="admin_router")
+
+
+# =============================================================================
+# ROUTER REGISTRATION
+# =============================================================================
+
+AdminRouter.include_routers()
+
+# =============================================================================
+# USAGE EXAMPLE
+# =============================================================================
+
+"""
+How to use in main.py:
+---------------------
+from handlers.admin.admin_router import AdminRouter
+
+dp.include_router(AdminRouter)
+
+All admin functionality is now available under the AdminRouter.
+Each sub-router handles its own callbacks and states.
+"""
+
+============================================================
+ПУТЬ К ФАЙЛУ: handlers\developer\developer_router.py
+============================================================
+
+# handlers/user/user_router.py
+from aiogram import Router
+
+
+
+DeveloperRouter = Router()
+
+# Подключаем все роутеры пользователя
+DeveloperRouter.include_routers()
+
+============================================================
+ПУТЬ К ФАЙЛУ: handlers\user\user_router.py
+============================================================
+
+"""
+User Router Module
+==================
+
+This module serves as the central entry point for all user-related routers.
+All user-facing functionality is imported and registered here for clean organization.
+
+Module Structure:
+-----------------
+1. User Panel - Main menu and navigation
+2. Registration - User onboarding and phone verification
+3. User Menu - Catalog browsing and dish viewing
+4. Shopping Cart - Order assembly and checkout
+5. Order History - Past orders archive
+6. Seasonal Dishes - Current promotions
+7. About Us - Cafe information and contacts
+8. Current Orders - Active order tracking
+
+Usage:
+------
+The UserRouter is imported in main.py and included in the dispatcher.
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+from aiogram import Router
+
+# -----------------------------------------------------------------------------
+# User Modules
+# -----------------------------------------------------------------------------
+from handlers.user.registration import RegistrationRouter          # 📝 User onboarding
+from handlers.user.user_confirm_orders import UserConfirmOrdersRouter
+from handlers.user.user_feedback import UserFeedbackRouter
+from handlers.user.user_menu import UserMenuRouter                 # 🍽 Menu browsing
+from handlers.user.user_panel import UserPanelRouter               # 🏠 Main dashboard
+from handlers.user.user_basket import UserBasketRouter             # 🛒 Shopping cart
+from handlers.user.user_order_history import UserOrdersRouter      # 📜 Order archive
+from handlers.user.user_promotions import UserPromotionsRouter     # 🌿 Seasonal offers
+from handlers.user.user_about import UserAboutRouter               # ℹ️ Cafe info
+from handlers.user.user_current_order import UserCurrentOrdersRouter  # 🍳 Active orders
+
+# =============================================================================
+# ROUTER INITIALIZATION
+# =============================================================================
+
+UserRouter = Router(name="user_router")
+
+"""
+Main user router that aggregates all user-facing functionality.
+
+This router is included in the main dispatcher and handles:
+- User registration and authentication
+- Menu browsing and dish selection
+- Shopping cart management
+- Order placement and tracking
+- Order history viewing
+- Cafe information
+"""
+
+# =============================================================================
+# ROUTER REGISTRATION
+# =============================================================================
+
+UserRouter.include_routers(
+    # 1. Main Panel - Dashboard and navigation
+    UserPanelRouter,
+    
+    # 2. Registration - User onboarding
+    RegistrationRouter,
+    
+    # 3. User Menu - Catalog browsing
+    UserMenuRouter,
+    
+    # 4. Shopping Cart - Order assembly
+    UserBasketRouter,
+    
+    # 5. Order History - Past orders
+    UserOrdersRouter,
+    
+    # 6. Seasonal Dishes - Current promotions
+    UserPromotionsRouter,
+    
+    # 7. About Us - Cafe information
+    UserAboutRouter,
+    
+    # 8. Current Orders - Active order tracking
+    UserCurrentOrdersRouter,
+
+    # 9. Future user-related routers can be added here as needed
+    UserConfirmOrdersRouter,
+
+    UserFeedbackRouter
+
+
+
+)
+
+# =============================================================================
+# USAGE EXAMPLE
+# =============================================================================
+
+"""
+How to use in main.py:
+---------------------
+from handlers.user.user_router import UserRouter
+
+dp.include_router(UserRouter)
+
+All user functionality is now available under the UserRouter.
+Each sub-router handles its own callbacks and states.
+
+State Structure:
+----------------
+User states are defined in States/user_states.py:
+- UserMenu: catalog, category, dish
+- UserMenu.catalog: browsing categories
+- UserMenu.category: viewing dishes in category
+- UserMenu.dish: viewing dish details
+- UserMenu.cart: managing shopping cart
+- UserMenu.checkout_comment: adding order comment
+- UserMenu.checkout_payment: payment confirmation
+"""
+
+============================================================
+ПУТЬ К ФАЙЛУ: keybords\inline.py
+============================================================
+
+from aiogram.types import InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+"""InlineKeyboard"""
+def get_callback_btns(
+        *,
+        btns: dict[str,str],
+        sizes: tuple[int] = (2,)):
+    
+    keyboard = InlineKeyboardBuilder()
+    for text, data in btns.items():
+        keyboard.add(InlineKeyboardButton(text = text, callback_data = data))
+    
+    return keyboard.adjust(*sizes).as_markup()
+
+def get_url_btns(
+        *,
+        btns: dict[str, str],
+        sizes: tuple[int] = (2,)):
+    
+    keyboard = InlineKeyboardBuilder()
+    for text, url in btns.items():
+        keyboard.add(InlineKeyboardButton(text = text, url = url))
+    return keyboard.adjust(*sizes).as_markup()
+
+def get_inlineMix_btns(
+        *,
+        btns: dict[str,str],
+        sizes: tuple[int] = (2,)):
+    
+    keyboard = InlineKeyboardBuilder()
+    for text, value in btns.items():
+        if "://" in value:
+            keyboard.add(InlineKeyboardButton(text = text, url = value))
+        else:
+            keyboard.add(InlineKeyboardButton(text = text, callback_data = value))
+
+    return keyboard.adjust(*sizes).as_markup()
+
+
+
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: keybords\reply.py
+============================================================
+
+from aiogram.types import  KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+
+
+"""ReplyKeyboard"""
+def get_keyboard(
+        *btns: str,
+        placeholder: str = None,
+        request_contact: int = None,
+        request_location: int = None,
+        sizes: tuple[int] = (2,),
+        one_time_keyboard : bool = True,
+):
+    '''
+    Parameters request_contact and request_location must be as indexes of btns args for buttons you need.
+    Example:
+    get_keyboard(
+            "Меню",
+            "О магазине",
+            "Варианты оплаты",
+            "Варианты доставки",
+            "Отправить номер телефона"
+            placeholder="Что вас интересует?",
+            request_contact=4,
+            sizes=(2, 2, 1)
+        )
+    '''
+    keyboard = ReplyKeyboardBuilder()
+
+    for index, text in enumerate(btns, start = 0):
+        if request_contact and request_contact == index:
+            keyboard.add(KeyboardButton(text = text, request_contact = True))
+
+        elif request_location and request_location == index:
+            keyboard.add(KeyboardButton(text = text, request_location = True))
+    
+        else:
+            keyboard.add(KeyboardButton(text = text))
+    
+    return keyboard.adjust(*sizes).as_markup(
+        resize_keyboard = True,
+        input_field_placeholder = placeholder,
+        one_time_keyboard = one_time_keyboard,
+        
+    )
+
+============================================================
+ПУТЬ К ФАЙЛУ: middlewares\db.py
+============================================================
+
+from typing import Any, Dict, Awaitable, Callable
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject, Message
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+class DataBaseSession(BaseMiddleware):
+    def __init__(self, session_pool: async_sessionmaker):
+        self.session_pool = session_pool    
+
+    async def __call__(
+            self,
+            handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
+            event: TelegramObject,
+            data: Dict[str, Any],
+    ) -> Any:
+            async with self.session_pool() as session:
+                 data["session"] = session
+                 return await handler(event, data)
+
+
+
+
+
+============================================================
+ПУТЬ К ФАЙЛУ: States\user_states.py
+============================================================
+
