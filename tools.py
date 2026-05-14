@@ -1,5 +1,8 @@
 # tools.py
-
+from datetime import datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+from database.orm_query import SubscriptionRepository, UserRepository
+from database.enumerate.subscription_enum import SubscriptionStatus
 import re
 from functools import wraps
 from typing import Callable, Dict, List, Optional, Tuple, Union, TypeVar
@@ -252,5 +255,121 @@ async def notify_admins(
         except Exception as e:
             ic(f"Error notifying admin {admin_id}: {e}")
 
-# tools.py (добавить)
+# tools.py (добавить в конец файла)
+
+# =============================================================================
+# УВЕДОМЛЕНИЯ ОБ ИСТЕКАЮЩИХ ПОДПИСКАХ
+# =============================================================================
+
+
+
+
+async def check_expiring_subscriptions(session: AsyncSession):
+    """
+    Проверяет подписки, которые истекают через 7, 3, 1 день,
+    и отправляет уведомления пользователям.
+    Запускать периодически (например, каждый день через asyncio.create_task)
+    """
+    from bot_instance import get_bot_instance
+    
+    bot = get_bot_instance()
+    
+    # Получаем все активные подписки
+    subscription_repo = SubscriptionRepository(session)
+    active_subscriptions = await subscription_repo.get_all(status=SubscriptionStatus.ACTIVE)
+    
+    if not active_subscriptions:
+        ic("No active subscriptions found")
+        return
+    
+    today = datetime.now().date()
+    notified_users = set()  # Чтобы не дублировать уведомления
+    
+    for sub in active_subscriptions:
+        # Получаем тариф для подписки
+        from database.orm_query import RateRepository
+        rate_repo = RateRepository(session)
+        rate = await rate_repo.get(sub.rate_id)
+        
+        if not rate:
+            continue
+        
+        # Вычисляем дату окончания подписки (created_at + days)
+        expiry_date = (sub.created + timedelta(days=rate.days)).date()
+        days_left = (expiry_date - today).days
+        
+        # Проверяем, нужно ли уведомлять
+        if days_left in [7, 3, 1] and sub.user_id not in notified_users:
+            # Получаем пользователя
+            user_repo = UserRepository(session)
+            user = await user_repo.get(sub.user_id)
+            
+            if not user:
+                continue
+            
+            # Формируем сообщение
+            if days_left == 7:
+                text = (
+                    f"⚠️ <b>Ваша подписка истекает через 7 дней!</b>\n\n"
+                    f"📋 <b>Тариф:</b> {rate.name}\n"
+                    f"📅 <b>Дата окончания:</b> {expiry_date.strftime('%d.%m.%Y')}\n\n"
+                    f"➡️ <b>Продлите подписку</b>, чтобы не потерять доступ к VPN."
+                )
+            elif days_left == 3:
+                text = (
+                    f"⚠️ <b>Ваша подписка истекает через 3 дня!</b>\n\n"
+                    f"📋 <b>Тариф:</b> {rate.name}\n"
+                    f"📅 <b>Дата окончания:</b> {expiry_date.strftime('%d.%m.%Y')}\n\n"
+                    f"➡️ <b>Продлите подписку</b>, чтобы не потерять доступ к VPN."
+                )
+            elif days_left == 1:
+                text = (
+                    f"🔥 <b>Ваша подписка истекает ЗАВТРА!</b>\n\n"
+                    f"📋 <b>Тариф:</b> {rate.name}\n"
+                    f"📅 <b>Дата окончания:</b> {expiry_date.strftime('%d.%m.%Y')}\n\n"
+                    f"➡️ <b>Срочно продлите подписку</b>, чтобы не остаться без VPN!"
+                )
+            else:
+                continue
+            
+            btns = {
+                "🛒 Продлить подписку": "user_profile"
+            }
+            
+            try:
+                await bot.send_message(
+                    user.user_id,
+                    text,
+                    reply_markup=get_callback_btns(btns=btns, sizes=(1,)),
+                    parse_mode=ParseMode.HTML
+                )
+                notified_users.add(sub.user_id)
+                ic(f"Sent expiration notification to user {user.user_id}, days left: {days_left}")
+            except Exception as e:
+                ic(f"Failed to send notification to {user.user_id}: {e}")
+
+
+async def run_expiration_checker(session_maker, check_interval_hours: int = 24):
+    """
+    Фоновая задача для периодической проверки истекающих подписок.
+    Запускать при старте бота.
+    
+    Args:
+        session_maker: фабрика сессий SQLAlchemy
+        check_interval_hours: интервал проверки в часах (по умолчанию 24)
+    """
+    from bot_instance import get_bot_instance
+    import asyncio
+    
+    bot = get_bot_instance()
+    
+    while True:
+        try:
+            async with session_maker() as session:
+                await check_expiring_subscriptions(session)
+        except Exception as e:
+            ic(f"Error in expiration checker: {e}")
+        
+        # Ждём указанный интервал
+        await asyncio.sleep(check_interval_hours * 3600)
 

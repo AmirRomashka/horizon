@@ -12,14 +12,17 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums.parse_mode import ParseMode 
 
 from database.engine import create_db, drop_db, session_maker 
+from database.redis_client import redis_client
 
 from middlewares.db import DataBaseSession 
-
+from middlewares.redis import RedisMiddleware
 
 from handlers.admin.admin_router import AdminRouter
 from handlers.user.user_router import UserRouter 
 import bot_instance 
 
+# Импортируем фоновую задачу
+from tools import run_expiration_checker
 
 
 # ======================================================================
@@ -46,29 +49,33 @@ bot_instance.set_bot_instance(bot)
 all_user_id = []
 
 
-
 # ======================================================================
 # STARTUP/SHUTDOWN HANDLERS
 # ======================================================================
 
 async def on_startup(bot):
-    """Initialize database on bot startup"""
+    """Initialize database and Redis on bot startup"""
     run_param = False   # Set to True to reset database
     if run_param:
         await drop_db()
 
     await create_db()
     print("✅ Database initialized")
+    
+    # Подключаем Redis
+    await redis_client.connect()
+    print("✅ Redis connected")
+    
+    # Запускаем фоновую задачу для проверки истекающих подписок
+    asyncio.create_task(run_expiration_checker(session_maker, check_interval_hours=24))
+    print("✅ Expiration checker started")
 
 
 async def on_shutdown(bot: Bot):
     """Cleanup on bot shutdown"""
+    await redis_client.disconnect()
+    print("❌ Redis disconnected")
     print("❌ Bot stopped")
-
-
-# ======================================================================
-# SCHEDULED TASKS SETUP
-# ======================================================================
 
 
 # ======================================================================
@@ -82,8 +89,9 @@ async def polling_bot():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Add database middleware
+    # Add middlewares
     dp.update.middleware(DataBaseSession(session_pool=session_maker))
+    dp.update.middleware(RedisMiddleware())
 
     # Start polling
     await bot.delete_webhook(

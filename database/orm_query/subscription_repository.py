@@ -1,4 +1,5 @@
 # database/orm_query/subscription_repository.py
+
 from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ class SubscriptionRepository(BaseRepository[Subscriptions]):
 
     async def get_by_sub_id(self, sub_id: str) -> Optional[Subscriptions]:
         """Получить подписку по UUID"""
-        return await self.get(sub_id, id_column="sub_id")
+        return await self.get_by_field("sub_id", sub_id)  # ← исправлено
 
     async def get_by_user_id(self, user_id: int) -> List[Subscriptions]:
         """Получить все подписки пользователя"""
@@ -48,8 +49,6 @@ class SubscriptionRepository(BaseRepository[Subscriptions]):
         """Получить все активные подписки"""
         return await self.get_all(status=SubscriptionStatus.ACTIVE)
     
-    # database/orm_query/subscription_repository.py (добавить)
-
-    async def get_by_user_id(self, user_id: int) -> List[Subscriptions]:
-        """Получить все подписки пользователя по user_id"""
-        return await self.get_all(user_id=user_id)
+    async def get_by_sub_id(self, sub_id: str) -> Optional[Subscriptions]:
+        """Получить подписку по UUID"""
+        return await self.get_by_field("sub_id", sub_id)

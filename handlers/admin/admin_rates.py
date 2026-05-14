@@ -5,9 +5,11 @@ from aiogram import F, Router, types
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from States.user_states import AdminStates
 from database.orm_query.rate_repository import RateRepository
+from database.orm_query.subscription_repository import SubscriptionRepository
 from database.enumerate.rate_enum import RateStatus
 from tools import send_clean_message
 
@@ -55,7 +57,7 @@ async def set_rates_logic(target: Union[types.Message, types.CallbackQuery], ses
     
     for rate in rates:
         status_emoji = "✅" if rate.status == RateStatus.ACTIVE else "❌"
-        btns[f"{status_emoji} {rate.name} - {rate.price}₽"] = f"admin_rate_edit_{rate.id}"  # ← rate.id
+        btns[f"{status_emoji} {rate.name} - {rate.price}₽"] = f"admin_rate_edit_{rate.id}"
     
     btns["➕ Создать новый тариф"] = "admin_rate_create"
     btns["🔙 Назад в админ-панель"] = "admin_panel"
@@ -87,16 +89,16 @@ async def set_rates_logic(target: Union[types.Message, types.CallbackQuery], ses
 @AdminRatesRouter.callback_query(F.data.startswith("admin_rate_edit_"))
 async def edit_rate(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
     """Редактирование конкретного тарифа"""
-    rate_id = int(call.data.split("_")[-1])  # это id (первичный ключ)
+    rate_id = int(call.data.split("_")[-1])
     
     rate_repo = RateRepository(session)
-    rate = await rate_repo.get(rate_id)  # поиск по id
+    rate = await rate_repo.get(rate_id)
     
     if not rate:
         await call.answer("❌ Тариф не найден", show_alert=True)
         return
     
-    await state.update_data(rate_id=rate.id)  # сохраняем id
+    await state.update_data(rate_id=rate.id)
     await state.set_state(AdminStates.admin_rate_edit)
     
     status_text = "Активен ✅" if rate.status == RateStatus.ACTIVE else "Неактивен ❌"
@@ -111,11 +113,11 @@ async def edit_rate(call: types.CallbackQuery, state: FSMContext, session: Async
     )
     
     btns = {
-        "✏️ Изменить название": f"admin_rate_edit_name_{rate.id}",      # ← rate.id
-        "💰 Изменить цену": f"admin_rate_edit_price_{rate.id}",         # ← rate.id
-        "📅 Изменить дни": f"admin_rate_edit_days_{rate.id}",           # ← rate.id
-        "🔄 Сменить статус": f"admin_rate_toggle_status_{rate.id}",     # ← rate.id
-        "🗑 Удалить тариф": f"admin_rate_delete_{rate.id}",             # ← rate.id
+        "✏️ Изменить название": f"admin_rate_edit_name_{rate.id}",
+        "💰 Изменить цену": f"admin_rate_edit_price_{rate.id}",
+        "📅 Изменить дни": f"admin_rate_edit_days_{rate.id}",
+        "🔄 Сменить статус": f"admin_rate_toggle_status_{rate.id}",
+        "🗑 Удалить тариф": f"admin_rate_delete_{rate.id}",
         "🔙 Назад к списку": "admin_rates_set"
     }
     
@@ -130,7 +132,7 @@ async def edit_rate(call: types.CallbackQuery, state: FSMContext, session: Async
 @AdminRatesRouter.callback_query(F.data.startswith("admin_rate_toggle_status_"))
 async def toggle_rate_status(call: types.CallbackQuery, session: AsyncSession):
     """Переключение статуса тарифа (активен/неактивен)"""
-    rate_id = int(call.data.split("_")[-1])  # это id
+    rate_id = int(call.data.split("_")[-1])
     
     rate_repo = RateRepository(session)
     rate = await rate_repo.get(rate_id)
@@ -141,18 +143,58 @@ async def toggle_rate_status(call: types.CallbackQuery, session: AsyncSession):
     
     new_status = RateStatus.INACTIVE if rate.status == RateStatus.ACTIVE else RateStatus.ACTIVE
     await rate_repo.update(rate_id, status=new_status)
+    await session.commit()
     
     status_text = "активирован ✅" if new_status == RateStatus.ACTIVE else "деактивирован ❌"
     await call.answer(f"✅ Тариф {status_text}", show_alert=True)
     
-    # Возвращаемся к списку тарифов
     await set_rates_logic(call, session)
 
 
 @AdminRatesRouter.callback_query(F.data.startswith("admin_rate_delete_"))
 async def delete_rate(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
     """Удаление тарифа (с подтверждением)"""
-    rate_id = int(call.data.split("_")[-1])  # это id
+    rate_id = int(call.data.split("_")[-1])
+    
+    # Сначала получаем тариф
+    rate_repo = RateRepository(session)
+    rate = await rate_repo.get(rate_id)
+    
+    if not rate:
+        await call.answer("❌ Тариф не найден", show_alert=True)
+        return
+    
+    # Проверяем подписки на этот тариф
+    subscription_repo = SubscriptionRepository(session)
+    subscriptions = await subscription_repo.get_all(rate_id=rate_id)
+    
+    if subscriptions:
+        active_count = sum(1 for s in subscriptions if s.is_active())
+        total_count = len(subscriptions)
+        
+        await call.answer(
+            f"❌ Нельзя удалить тариф «{rate.name}»: на него есть {total_count} подписок (активных: {active_count}).\n"
+            "Сначала удалите или переназначьте подписки.",
+            show_alert=True
+        )
+        return
+    
+    # Проверяем платежи на этот тариф
+    from database.orm_query.payment_repository import PaymentRepository
+    payment_repo = PaymentRepository(session)
+    payments = await payment_repo.get_all(rate_id=rate_id)
+    
+    if payments:
+        pending_count = sum(1 for p in payments if p.is_pending())
+        paid_count = sum(1 for p in payments if p.is_paid())
+        total_count = len(payments)
+        
+        await call.answer(
+            f"❌ Нельзя удалить тариф «{rate.name}»: на него есть {total_count} платежей (оплаченных: {paid_count}, ожидающих: {pending_count}).\n"
+            "Сначала удалите или переназначьте платежи.",
+            show_alert=True
+        )
+        return
     
     await state.update_data(delete_rate_id=rate_id)
     await state.set_state(AdminStates.admin_rate_confirm_delete)
@@ -173,7 +215,7 @@ async def delete_rate(call: types.CallbackQuery, state: FSMContext, session: Asy
 @AdminRatesRouter.callback_query(F.data.startswith("admin_rate_confirm_delete_"))
 async def confirm_delete_rate(call: types.CallbackQuery, session: AsyncSession):
     """Подтверждение удаления тарифа"""
-    rate_id = int(call.data.split("_")[-1])  # это id
+    rate_id = int(call.data.split("_")[-1])
     
     rate_repo = RateRepository(session)
     rate = await rate_repo.get(rate_id)
@@ -184,10 +226,9 @@ async def confirm_delete_rate(call: types.CallbackQuery, session: AsyncSession):
     
     rate_name = rate.name
     await rate_repo.delete(rate_id)
+    await session.commit()
     
     await call.answer(f"✅ Тариф «{rate_name}» удалён", show_alert=True)
-    
-    # Возвращаемся к списку тарифов
     await set_rates_logic(call, session)
 
 
@@ -293,11 +334,7 @@ async def create_rate_get_days(message: types.Message, state: FSMContext, sessio
             days=days,
             status=RateStatus.ACTIVE
         )
-        result = await session.commit()
-        
-        if not result:
-            await message.answer("❌ Ошибка при создании тарифа.")
-            return
+        await session.commit()
         
         await message.answer(
             f"✅ <b>Тариф успешно создан!</b>\n\n"
@@ -309,8 +346,6 @@ async def create_rate_get_days(message: types.Message, state: FSMContext, sessio
         )
         
         await state.clear()
-        
-        # Возвращаемся к списку тарифов
         await set_rates_logic(message, session)
         
     except ValueError:

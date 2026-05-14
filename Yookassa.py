@@ -1,7 +1,8 @@
-# services/yookassa_service.py
+# services/Yookassa.py
 import os
 import uuid
 import asyncio
+import json
 from decimal import Decimal
 from typing import Optional
 from datetime import datetime
@@ -15,6 +16,7 @@ from database.orm_query import (
     PaymentRepository, RateRepository, HostRepository, 
     SubscriptionRepository, UserRepository
 )
+from database.redis_client import redis_client as global_redis
 from database.enumerate.payment_enum import PaymentStatus
 from database.enumerate.subscription_enum import SubscriptionStatus
 from services.xui_client import XUIClient
@@ -32,7 +34,6 @@ Configuration.secret_key = os.getenv("SECRET_KEY")
 # ======================================================================
 
 def create_payment(amount: int, user_id: int, rate_name: str, rate_days: int) -> YooPayment:
-    """Создание платежа на покупку подписки"""
     payment_request = {
         "amount": {"value": str(amount), "currency": "RUB"},
         "confirmation": {"type": "redirect", "return_url": "https://t.me/horizon_vpn_bot"},
@@ -52,7 +53,6 @@ def create_payment(amount: int, user_id: int, rate_name: str, rate_days: int) ->
 # ======================================================================
 
 async def cancel_payment_by_id(payment_id: str) -> bool:
-    """Отменяет платёж в YooKassa"""
     try:
         loop = asyncio.get_event_loop()
         payment = await loop.run_in_executor(None, YooPayment.find_one, payment_id)
@@ -78,7 +78,6 @@ async def check_payment_status(
     max_attempts: int = 60,
     check_interval: int = 10
 ) -> bool:
-    """Проверка статуса платежа с созданием подписки при успехе"""
     payment_repo = PaymentRepository(session)
     bot = get_bot_instance()
     
@@ -93,8 +92,12 @@ async def check_payment_status(
                 if not payment or payment.is_paid():
                     return True
                 
+                # Получаем данные из Redis перед обработкой
+                redis = global_redis
+                payment_data = await redis.get(f"payment:{user_id}", as_json=True)
+                
                 amount = int(Decimal(str(response.amount.value)))
-                success = await _process_successful_payment(payment, user_id, session, amount)
+                success = await _process_successful_payment(payment, user_id, session, amount, payment_data)
                 
                 if success:
                     await bot.send_message(
@@ -138,10 +141,13 @@ async def _process_successful_payment(
     payment,
     user_id: int,
     session: AsyncSession,
-    amount: int
+    amount: int,
+    payment_data: Optional[dict] = None
 ) -> bool:
-    """Обработка успешного платежа и создание подписки через API 3x-ui"""
+    """Обработка успешного платежа (поддержка покупки и продления)"""
+    
     bot = get_bot_instance()
+    redis = global_redis
     
     try:
         # 1. Получаем тариф
@@ -172,72 +178,179 @@ async def _process_successful_payment(
             ic(f"User {user_id} not found")
             return False
         
-        # 4. Создаём клиента через API
-        # Запускаем синхронный XUIClient в потоке
-        def create_client_sync():
-            client = XUIClient(host)
-            expiry_time = int((datetime.now().timestamp() + rate.days * 86400) * 1000)
-            client_email = f"user_{user.user_id}_{rate.id}_{int(datetime.now().timestamp())}"
-            
-            ic(f"Creating client on {host.name}: inbound={host.inbound_id}, email={client_email}")
-            
-            success, client_data = client.add_client(
-                inbound_id=host.inbound_id,
-                email=client_email,
-                expiry_time=expiry_time,
-                total_gb=0
-            )
-            client.close()
-            return success, client_data
+        # 4. Определяем тип платежа (покупка или продление)
+        payment_type = payment_data.get("type", "buy") if payment_data else "buy"
         
-        success, client_data = await asyncio.to_thread(create_client_sync)
-        
-        if not success or not client_data:
-            ic(f"Failed to create client on host {host.name}")
-            await bot.send_message(
-                user_id,
-                "❌ <b>Ошибка активации подписки</b>\n\nНе удалось создать клиента на сервере.\n"
-                "Свяжитесь с поддержкой: @hor1zon_support",
-                parse_mode="HTML"
-            )
-            return False
-        
-        vless_url = client_data.get("vless_url")
-        if not vless_url:
-            ic("No vless_url in client_data")
-            return False
-        
-        # 5. Создаём подписку в БД
         subscription_repo = SubscriptionRepository(session)
-        await subscription_repo.create(
-            sub_id=client_data.get("id"),
-            user_id=user.user_id,
-            host_id=host.host_id,
-            rate_id=rate.id,
-            vless_url=vless_url,
-            status=SubscriptionStatus.ACTIVE
-        )
         
-        # 6. Отмечаем платеж как оплаченный
-        payment.mark_as_paid()
-        host.current_clients += 1
-        await session.commit()
+        if payment_type == "extend":
+            # ========== ПРОДЛЕНИЕ ПОДПИСКИ ==========
+            subscription_uuid = payment_data.get("subscription_uuid")
+            inbound_id = payment_data.get("inbound_id", host.inbound_id)
+            
+            ic(f"Processing EXTEND for subscription {subscription_uuid}")
+            
+            # Получаем существующую подписку
+            existing_sub = await subscription_repo.get_by_sub_id(subscription_uuid)
+            
+            if not existing_sub:
+                ic(f"Subscription {subscription_uuid} not found")
+                return False
+            
+            # Обновляем клиента через API
+            def update_client_sync():
+                client = XUIClient(host)
+                success, _ = client.extend_client_subscription(
+                    inbound_id=inbound_id,
+                    client_uuid=subscription_uuid,
+                    additional_days=rate.days
+                )
+                client.close()
+                return success
+            
+            success = await asyncio.to_thread(update_client_sync)
+            
+            if not success:
+                ic(f"Failed to extend subscription {subscription_uuid}")
+                await bot.send_message(
+                    user_id,
+                    "❌ <b>Ошибка продления подписки</b>\n\nНе удалось продлить подписку на сервере.\n"
+                    "Свяжитесь с поддержкой: @hor1zon_support",
+                    parse_mode="HTML"
+                )
+                return False
+            
+            # Обновляем подписку в БД
+            await subscription_repo.update(
+                existing_sub.sub_id,
+                rate_id=rate.id,
+                status=SubscriptionStatus.ACTIVE
+            )
+            
+            # Отмечаем платеж как оплаченный
+            payment.mark_as_paid()
+            await session.commit()
+            
+            # Отправляем сообщение об успешном продлении
+            success_text = (
+                f"✅ <b>Подписка успешно продлена!</b>\n\n"
+                f"📋 <b>Тариф:</b> {rate.name}\n"
+                f"📅 <b>Дней добавлено:</b> {rate.days}\n"
+                f"💰 <b>Оплачено:</b> {amount}₽\n\n"
+                f"🖥 <b>Сервер:</b> {host.name}\n\n"
+                f"🔗 <b>Ваша VLESS ссылка (осталась без изменений):</b>\n"
+                f"<code>{existing_sub.vless_url}</code>"
+            )
+            
+            await bot.send_message(user_id, success_text, parse_mode="HTML")
+            
+            ic(f"Subscription extended for user {user_id}")
+            return True
         
-        # 7. Отправляем VLESS ссылку
-        vless_text = (
-            f"🔗 <b>Ваша VLESS ссылка для подключения</b>\n\n"
-            f"📋 <b>Тариф:</b> {rate.name}\n"
-            f"📅 <b>Дней:</b> {rate.days}\n"
-            f"💰 <b>Оплачено:</b> {amount}₽\n"
-            f"🖥 <b>Сервер:</b> {host.name}\n\n"
-            f"<code>{vless_url}</code>\n\n"
-            f"📌 <i>Нажмите на ссылку для копирования</i>"
-        )
-        
-        await bot.send_message(user_id, vless_text, parse_mode="HTML")
-        
-        ic(f"Subscription created for user {user_id}")
-        return True
+        else:
+            # ========== НОВАЯ ПОДПИСКА (ПОКУПКА) ==========
+            ic(f"Processing NEW subscription for user {user_id}")
+            
+            def create_client_sync():
+                client = XUIClient(host)
+                expiry_time = int((datetime.now().timestamp() + rate.days * 86400) * 1000)
+                client_email = f"user_{user.user_id}_{rate.id}_{int(datetime.now().timestamp())}"
+                
+                ic(f"Creating client on {host.name}: inbound={host.inbound_id}, email={client_email}")
+                
+                success, client_data = client.add_client(
+                    inbound_id=host.inbound_id,
+                    email=client_email,
+                    expiry_time=expiry_time,
+                    total_gb=0
+                )
+                client.close()
+                return success, client_data
+            
+            success, client_data = await asyncio.to_thread(create_client_sync)
+            
+            if not success or not client_data:
+                ic(f"Failed to create client on host {host.name}")
+                await bot.send_message(
+                    user_id,
+                    "❌ <b>Ошибка активации подписки</b>\n\nНе удалось создать клиента на сервере.\n"
+                    "Свяжитесь с поддержкой: @hor1zon_support",
+                    parse_mode="HTML"
+                )
+                return False
+            
+            client_id = client_data.get("id")
+            
+            def get_inbound_sync():
+                client = XUIClient(host)
+                inbound = client.get_inbound_by_id(host.inbound_id)
+                client.close()
+                return inbound
+            
+            inbound = await asyncio.to_thread(get_inbound_sync)
+            
+            if inbound:
+                hostname = host.api_url.split('//')[-1].split(':')[0]
+                port = inbound.get("port", 443)
+                
+                stream_settings = inbound.get("streamSettings", {})
+                if isinstance(stream_settings, str):
+                    try:
+                        stream_settings = json.loads(stream_settings)
+                    except:
+                        stream_settings = {}
+                
+                reality = stream_settings.get("realitySettings", {})
+                reality_settings = reality.get("settings", {})
+                public_key = reality_settings.get("publicKey", "")
+                server_name = reality.get("serverNames", ["www.amazon.com"])[0] if reality.get("serverNames") else "www.amazon.com"
+                short_ids = reality.get("shortIds", [""])
+                short_id = short_ids[0] if short_ids else ""
+                
+                vless_url = (
+                    f"vless://{client_id}@{hostname}:{port}"
+                    f"?type=tcp&encryption=none&security=reality"
+                    f"&pbk={public_key}&fp=chrome&sni={server_name}"
+                )
+                
+                if short_id:
+                    vless_url += f"&sid={short_id}"
+                
+                vless_url += f"&flow=xtls-rprx-vision#HorizonVPN"
+            else:
+                vless_url = client_data.get("vless_url", "")
+            
+            if not vless_url:
+                ic("No vless_url generated")
+                return False
+            
+            await subscription_repo.create(
+                sub_id=client_id,
+                user_id=user.user_id,
+                host_id=host.host_id,
+                rate_id=rate.id,
+                vless_url=vless_url,
+                status=SubscriptionStatus.ACTIVE
+            )
+            
+            payment.mark_as_paid()
+            host.current_clients += 1
+            await session.commit()
+            
+            vless_text = (
+                f"🔗 <b>Ваша VLESS ссылка для подключения</b>\n\n"
+                f"📋 <b>Тариф:</b> {rate.name}\n"
+                f"📅 <b>Дней:</b> {rate.days}\n"
+                f"💰 <b>Оплачено:</b> {amount}₽\n"
+                f"🖥 <b>Сервер:</b> {host.name}\n\n"
+                f"<code>{vless_url}</code>\n\n"
+                f"📌 <i>Нажмите на ссылку для копирования</i>"
+            )
+            
+            await bot.send_message(user_id, vless_text, parse_mode="HTML")
+            
+            ic(f"New subscription created for user {user_id}")
+            return True
         
     except Exception as e:
         ic(f"Error processing successful payment: {e}")
@@ -250,3 +363,6 @@ async def _process_successful_payment(
             parse_mode="HTML"
         )
         return False
+    finally:
+        # Удаляем временные данные из Redis
+        await redis.delete(f"payment:{user_id}")
