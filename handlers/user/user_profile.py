@@ -4,7 +4,9 @@ from aiogram import F, Router, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
+from icecream import ic
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta
 
 from config import WORK_DIR
 from tools import send_clean_message
@@ -29,11 +31,7 @@ def get_profile_keyboard(has_active_subscription: bool) -> dict:
 
 
 async def get_tariffs_keyboard(session: AsyncSession, has_subscription: bool = False) -> dict:
-    """
-    Возвращает кнопки с тарифами из БД
-    Если есть активная подписка — кнопки ведут на продление (extend_rate_)
-    Если нет подписки — кнопки ведут на покупку (buy_rate_)
-    """
+    """Возвращает кнопки с тарифами из БД"""
     rate_repo = RateRepository(session)
     rates = await rate_repo.get_active_rates()
     
@@ -51,7 +49,9 @@ async def get_tariffs_keyboard(session: AsyncSession, has_subscription: bool = F
 
 def get_profile_photo_path() -> FSInputFile:
     """Возвращает путь к фото профиля"""
-    photo_path = WORK_DIR / "image" / "user_images" / "profile_image.jpg"
+    photo_path = WORK_DIR / "image" / "user_images" / "profile_image.png"
+    # image\user_images\profile_image.png
+    ic(photo_path)
     return FSInputFile(str(photo_path))
 
 
@@ -65,6 +65,16 @@ def format_vless_link(vless_url: str, max_length: int = 50) -> str:
     if len(vless_url) <= max_length:
         return vless_url
     return f"{vless_url[:max_length]}..."
+
+
+def get_subscription_status(days_left: int) -> tuple:
+    """Возвращает статус подписки и эмодзи"""
+    if days_left <= 0:
+        return "❌ Истекла", "🔴"
+    elif days_left <= 3:
+        return f"⚠️ Истекает ({days_left} дн.)", "⚠️"
+    else:
+        return "✅ Активна", "🟢"
 
 
 # =============================================================================
@@ -111,36 +121,43 @@ async def user_profile(
         current_rate = await rate_repo.get(active_sub.rate_id)
         current_rate_name = current_rate.name if current_rate else "Неизвестный"
         
-        from datetime import datetime, timedelta
-        expiry_date = (active_sub.created + timedelta(days=current_rate.days)).date() if current_rate else None
-        expiry_text = expiry_date.strftime('%d.%m.%Y') if expiry_date else "Неизвестно"
-        days_left = (expiry_date - datetime.now().date()).days if expiry_date else 0
+        # Используем expires_at из подписки (если есть), иначе вычисляем из created
+        if active_sub.expires_at:
+            expiry_date = active_sub.expires_at.date()
+            days_left = (expiry_date - datetime.now().date()).days
+            expiry_text = expiry_date.strftime('%d.%m.%Y')
+        else:
+            # Fallback для старых подписок
+            expiry_date = (active_sub.created + timedelta(days=current_rate.days)).date()
+            days_left = (expiry_date - datetime.now().date()).days
+            expiry_text = expiry_date.strftime('%d.%m.%Y')
         
-        # Формируем текст с информацией о подписке
+        status_text, status_emoji = get_subscription_status(days_left)
+        
         text = (
-            f"👤 <b>Ваш профиль</b>\n\n"
-            f"🆔 <b>Имя:</b> {username}\n"
-            f"📡 <b>Статус:</b> ✅ Активна\n"
-            f"📋 <b>Текущий тариф:</b> {current_rate_name}\n"
-            f"⏰ <b>Действует до:</b> {expiry_text}\n"
-            f"📅 <b>Осталось дней:</b> {days_left}\n\n"
-            f"🔗 <b>VLESS ссылка:</b>\n"
-            f"<code>{format_vless_link(active_sub.vless_url)}</code>\n\n"
-            f"⬇️ <b>Выберите тариф для продления:</b>\n\n"
-            f"📢 <b>Наш канал:</b> @hor1zon_vpn\n"
-            f"💬 <b>Поддержка:</b> @Ilya_Nester0v"
-        )
+                f"<b>{username}</b>\n\n"
+                f"Статус: {status_emoji} {status_text}\n"
+                f"Тариф: {current_rate_name}\n"
+                f"Действует до: {expiry_text}\n"
+                f"Осталось: {days_left} дн.\n\n"
+                f"<b>VLESS</b>\n"
+                f"<code>{format_vless_link(active_sub.vless_url)}</code>\n\n"
+                f"<b>Продлить ↓</b>\n\n"
+                f"@hor1zon_vpn  |  @Ilya_Nester0v"
+)
     else:
         text = (
-            f"👋 <b>Добро пожаловать, {username}!</b>\n\n"
-            f"🌍 <b>Horizon VPN</b> — надёжный и быстрый доступ к открытому интернету.\n\n"
-            f"✅ Безлимитная скорость\n"
-            f"✅ Защита ваших данных\n"
-            f"✅ Поддержка 24/7\n\n"
-            f"🔥 <b>Выберите подходящий тариф:</b>\n\n"
-            f"📢 <b>Наш канал:</b> @hor1zon_vpn\n"
-            f"💬 <b>Поддержка:</b> @Ilya_Nester0v"
-        )
+                f"Добро пожаловать, {username}.\n\n"
+                f"<b>Horizon VPN.</b>\n"
+                f"Ваша приватность — наша архитектура.\n\n"
+                f"▸ Технология подключения:\n"
+                f"  VLESS + REALITY\n"
+                f"▸ Маскировка трафика\n"
+                f"▸ Обход блокировок\n\n"
+                f"<b>Доступные тарифы ↓</b>\n\n"
+                f"▪️ Канал: @hor1zon_vpn\n"
+                f"▪️ Поддержка: @Ilya_Nester0v"
+)
     
     profile_btns = get_profile_keyboard(has_subscription)
     all_btns = {**tariffs_btns, **profile_btns}
@@ -162,9 +179,7 @@ async def my_subscription(
     session: AsyncSession,
     redis: RedisClient
 ):
-    """
-    Показывает подробную информацию о текущей подписке с полной VLESS ссылкой
-    """
+    """Показывает подробную информацию о текущей подписке с полной VLESS ссылкой"""
     user_repo = UserRepository(session)
     user = await user_repo.get_by_tg_id(call.from_user.id)
     
@@ -186,9 +201,14 @@ async def my_subscription(
         await call.answer("❌ Тариф не найден", show_alert=True)
         return
     
-    from datetime import datetime, timedelta
-    expiry_date = (active_sub.created + timedelta(days=rate.days)).date()
-    days_left = (expiry_date - datetime.now().date()).days
+    # Используем expires_at из подписки
+    if active_sub.expires_at:
+        expiry_date = active_sub.expires_at.date()
+        days_left = (expiry_date - datetime.now().date()).days
+    else:
+        # Fallback для старых подписок
+        expiry_date = (active_sub.created + timedelta(days=rate.days)).date()
+        days_left = (expiry_date - datetime.now().date()).days
     
     # Статус с эмодзи
     if days_left <= 0:
@@ -202,20 +222,20 @@ async def my_subscription(
         status_emoji = "🟢"
     
     text = (
-        f"📡 <b>Детали вашей подписки</b>\n\n"
-        f"📋 <b>Тариф:</b> {rate.name}\n"
-        f"💰 <b>Цена:</b> {rate.price}₽\n"
-        f"📅 <b>Дней:</b> {rate.days}\n"
-        f"📊 <b>Лимит:</b> Безлимит 🌊\n\n"
-        f"📅 <b>Дата начала:</b> {active_sub.created.strftime('%d.%m.%Y')}\n"
-        f"⏰ <b>Действует до:</b> {expiry_date.strftime('%d.%m.%Y')}\n"
-        f"📆 <b>Осталось дней:</b> {days_left}\n"
-        f"📡 <b>Статус:</b> {status_emoji} {status_text}\n\n"
-        f"🔗 <b>Ваша VLESS ссылка для подключения:</b>\n"
+        f"<b>Подписка Horizon</b>\n\n"
+        f"Тариф: {rate.name}\n"
+        f"Цена: {rate.price}₽\n"
+        f"Дней: {rate.days}\n"
+        f"Лимит: ∞\n\n"
+        f"Начало: {active_sub.created.strftime('%d.%m.%Y')}\n"
+        f"Окончание: {expiry_date.strftime('%d.%m.%Y')}\n"
+        f"Осталось: {days_left} дн.\n"
+        f"Статус: {status_emoji} {status_text}\n\n"
+        f"<b>VLESS ссылка</b>\n"
         f"<code>{active_sub.vless_url}</code>\n\n"
-        f"💡 <i>Нажмите на ссылку для копирования</i>\n\n"
-        f"🔄 <b>Для продления</b> нажмите на любой тариф ниже"
-    )
+        f"<i>Нажмите для копирования</i>"
+)
+
     
     btns = {"🔙 Назад в профиль": "user_profile"}
     
@@ -234,17 +254,17 @@ async def help_handler(call: types.CallbackQuery, state: FSMContext, redis: Redi
     await state.clear()
     
     text = (
-        "❓ <b>Помощь по боту Horizon VPN</b>\n\n"
-        "🔹 <b>Как подключиться?</b>\n"
-        "1. Выберите тариф и оплатите\n"
-        "2. Получите VLESS ссылку\n"
-        "3. Скачайте клиент (V2Ray, Nekobox, Hiddify)\n"
-        "4. Импортируйте ссылку\n\n"
-        "🔹 <b>Проблемы с подключением?</b>\n"
-        "Проверьте интернет, смените протокол\n\n"
-        f"📢 <b>Наш канал:</b> @hor1zon_vpn\n"
-        f"💬 <b>Поддержка:</b> @Ilya_Nester0v"
-    )
+        f"<b>Horizon VPN</b>\n\n"
+        f"Подключение:\n"
+        f"1. Выберите тариф\n"
+        f"2. Оплатите\n"
+        f"3. Получите ссылку\n"
+        f"4. Импортируйте в клиент\n\n"
+        f"Клиенты:\n"
+        f"V2Ray, Nekobox, Hiddify\n\n"
+        f"Канал: @hor1zon_vpn\n"
+        f"Поддержка: @Ilya_Nester0v"
+)
     
     await send_clean_message(
         target=call,

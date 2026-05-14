@@ -95,18 +95,19 @@ async def buy_rate(
         
         # Отправляем сообщение с кнопкой оплаты
         text = (
-            f"💳 <b>Платёж создан!</b>\n\n"
-            f"📋 <b>Тариф:</b> {rate.name}\n"
-            f"💰 <b>Сумма:</b> {rate.price}₽\n"
-            f"📅 <b>Дней:</b> {rate.days}\n\n"
-            f"👇 Нажмите на кнопку для перехода к оплате\n\n"
-            f"⚠️ <i>Не закрывайте это сообщение до завершения оплаты</i>"
-        )
+                f"<b>Horizon</b>\n\n"
+                f"Тариф: {rate.name}\n"
+                f"Сумма: {rate.price}₽\n"
+                f"Период: {rate.days} дн.\n\n"
+                f"<b>Оплата</b>\n"
+                f"Нажмите ниже для перехода\n\n"
+                f"Платёж действителен 10 минут"
+            )
         
         btns = {
-            "💳 Оплатить": yoo_payment.confirmation.confirmation_url,
-            "❌ Отменить платёж": "cancel_payment"
-        }
+                "Оплатить →": yoo_payment.confirmation.confirmation_url,
+                "Отменить": "cancel_payment"
+            }
         
         reply_markup = get_inlineMix_btns(btns=btns, sizes=(1,))
         
@@ -217,18 +218,19 @@ async def extend_rate(
         
         # Отправляем сообщение с кнопкой оплаты
         text = (
-            f"💳 <b>Платёж для продления создан!</b>\n\n"
-            f"📋 <b>Тариф:</b> {rate.name}\n"
-            f"💰 <b>Сумма:</b> {rate.price}₽\n"
-            f"📅 <b>Дней:</b> {rate.days}\n\n"
-            f"👇 Нажмите на кнопку для перехода к оплате\n\n"
-            f"⚠️ <i>После оплаты ваша подписка будет продлена на {rate.days} дней</i>"
-        )
+                f"<b>Продление подписки Horizon</b>\n\n"
+                f"Тариф: {rate.name}\n"
+                f"Сумма: {rate.price}₽\n"
+                f"Период: +{rate.days} дн.\n\n"
+                f"<b>Оплата</b>\n"
+                f"Нажмите ниже\n\n"
+                f"После оплаты подписка продлится автоматически"
+)
         
         btns = {
-            "💳 Оплатить продление": yoo_payment.confirmation.confirmation_url,
-            "❌ Отменить": "cancel_payment"
-        }
+                "Продлить →": yoo_payment.confirmation.confirmation_url,
+                "Отменить": "cancel_payment"
+            }
         
         reply_markup = get_inlineMix_btns(btns=btns, sizes=(1,))
         
@@ -279,9 +281,13 @@ async def cancel_payment_handler(
     
     await state.clear()
     
+    text = (
+        f"<b>Платёж отменён</b>\n\n"
+        f"Вы можете выбрать другой тариф в профиле."
+    )
+
     await call.message.edit_text(
-        "❌ <b>Платёж отменён</b>\n\n"
-        "Вы можете выбрать другой тариф в профиле.",
+        text = text,
         parse_mode="HTML"
     )
     

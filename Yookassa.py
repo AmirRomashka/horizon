@@ -5,7 +5,7 @@ import asyncio
 import json
 from decimal import Decimal
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from icecream import ic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,8 +36,8 @@ Configuration.secret_key = os.getenv("SECRET_KEY")
 def create_payment(amount: int, user_id: int, rate_name: str, rate_days: int) -> YooPayment:
     payment_request = {
         "amount": {"value": str(amount), "currency": "RUB"},
-        "confirmation": {"type": "redirect", "return_url": "https://t.me/horizon_vpn_bot"},
-        "description": f"Оплата подписки {rate_name} на {rate_days} дней",
+        "confirmation": {"type": "redirect", "return_url": "https://t.me/OfficialHorizonBot"},
+        "description": f"{rate_name} · {rate_days} days",
         "capture": True,
         "metadata": {"user_id": user_id, "payment_type": "subscription", "rate_name": rate_name}
     }
@@ -92,7 +92,6 @@ async def check_payment_status(
                 if not payment or payment.is_paid():
                     return True
                 
-                # Получаем данные из Redis перед обработкой
                 redis = global_redis
                 payment_data = await redis.get(f"payment:{user_id}", as_json=True)
                 
@@ -102,7 +101,7 @@ async def check_payment_status(
                 if success:
                     await bot.send_message(
                         user_id,
-                        "✅ <b>Оплата прошла успешно!</b>\n\nВаша подписка активирована. Ссылка будет ниже 👇",
+                        "<b>Horizon VPN</b>\n\nОплата прошла.\nПодписка активирована.\n\n↓ ссылка ниже",
                         parse_mode="HTML"
                     )
                 return success
@@ -115,7 +114,7 @@ async def check_payment_status(
                 
                 await bot.send_message(
                     user_id,
-                    "❌ <b>Платёж был отменён</b>\n\nПопробуйте снова или выберите другой тариф.",
+                    "<b>Платёж отменён</b>\n\nВыберите другой тариф в профиле.",
                     parse_mode="HTML"
                 )
                 return False
@@ -127,7 +126,7 @@ async def check_payment_status(
     
     await bot.send_message(
         user_id,
-        "❌ <b>Не удалось подтвердить платёж</b>\n\nЕсли деньги списались, они вернутся в течение нескольких дней.\nСвяжитесь с поддержкой: @hor1zon_support",
+        "<b>Не удалось подтвердить платёж</b>\n\nЕсли деньги списаны, они вернутся в течение нескольких дней.\n\nПоддержка: @Ilya_Nester0v",
         parse_mode="HTML"
     )
     return False
@@ -150,41 +149,48 @@ async def _process_successful_payment(
     redis = global_redis
     
     try:
-        # 1. Получаем тариф
+        # ======================================================================
+        # 1. ПОЛУЧАЕМ ТАРИФ
+        # ======================================================================
         rate_repo = RateRepository(session)
         rate = await rate_repo.get(payment.rate_id)
         if not rate:
             ic(f"Rate {payment.rate_id} not found")
             return False
         
-        # 2. Получаем хост
+        # ======================================================================
+        # 2. ПОЛУЧАЕМ ХОСТ
+        # ======================================================================
         host_repo = HostRepository(session)
         host = await host_repo.get_host_for_new_client()
         if not host:
             ic("No available hosts found")
             await bot.send_message(
                 user_id,
-                "❌ <b>Ошибка активации</b>\n\nВременно нет доступных серверов. "
-                "Ваш платёж зарегистрирован, подписка будет активирована позже.\n"
-                "Свяжитесь с поддержкой: @hor1zon_support",
+                "<b>Ошибка активации</b>\n\nНет доступных серверов. Платёж зарегистрирован.\n\nПоддержка: @Ilya_Nester0v",
                 parse_mode="HTML"
             )
             return False
         
-        # 3. Получаем пользователя
+        # ======================================================================
+        # 3. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ
+        # ======================================================================
         user_repo = UserRepository(session)
         user = await user_repo.get_by_tg_id(user_id)
         if not user:
             ic(f"User {user_id} not found")
             return False
         
-        # 4. Определяем тип платежа (покупка или продление)
+        # ======================================================================
+        # 4. ОПРЕДЕЛЯЕМ ТИП ПЛАТЕЖА
+        # ======================================================================
         payment_type = payment_data.get("type", "buy") if payment_data else "buy"
-        
         subscription_repo = SubscriptionRepository(session)
         
+        # ======================================================================
+        # 5. ПРОДЛЕНИЕ ПОДПИСКИ
+        # ======================================================================
         if payment_type == "extend":
-            # ========== ПРОДЛЕНИЕ ПОДПИСКИ ==========
             subscription_uuid = payment_data.get("subscription_uuid")
             inbound_id = payment_data.get("inbound_id", host.inbound_id)
             
@@ -196,6 +202,20 @@ async def _process_successful_payment(
             if not existing_sub:
                 ic(f"Subscription {subscription_uuid} not found")
                 return False
+            
+            # Получаем текущую дату окончания из БД
+            current_expiry = existing_sub.expires_at
+            now = datetime.now()
+            
+            # Рассчитываем новую дату окончания
+            if current_expiry and current_expiry > now:
+                # Подписка активна → добавляем дни к существующей дате
+                new_expiry_date = current_expiry + timedelta(days=rate.days)
+                ic(f"Active subscription: current expiry={current_expiry}, adding {rate.days} days → new expiry={new_expiry_date}")
+            else:
+                # Подписка истекла или нет даты → от текущего момента
+                new_expiry_date = now + timedelta(days=rate.days)
+                ic(f"Expired or no subscription: starting from now, new expiry={new_expiry_date}")
             
             # Обновляем клиента через API
             def update_client_sync():
@@ -214,8 +234,7 @@ async def _process_successful_payment(
                 ic(f"Failed to extend subscription {subscription_uuid}")
                 await bot.send_message(
                     user_id,
-                    "❌ <b>Ошибка продления подписки</b>\n\nНе удалось продлить подписку на сервере.\n"
-                    "Свяжитесь с поддержкой: @hor1zon_support",
+                    "<b>Ошибка продления</b>\n\nПоддержка: @Ilya_Nester0v",
                     parse_mode="HTML"
                 )
                 return False
@@ -224,31 +243,34 @@ async def _process_successful_payment(
             await subscription_repo.update(
                 existing_sub.sub_id,
                 rate_id=rate.id,
-                status=SubscriptionStatus.ACTIVE
+                status=SubscriptionStatus.ACTIVE,
+                expires_at=new_expiry_date
             )
             
-            # Отмечаем платеж как оплаченный
             payment.mark_as_paid()
             await session.commit()
             
-            # Отправляем сообщение об успешном продлении
+            # Формируем сообщение об успешном продлении
+            new_date_str = new_expiry_date.strftime('%d.%m.%Y')
+            
             success_text = (
-                f"✅ <b>Подписка успешно продлена!</b>\n\n"
-                f"📋 <b>Тариф:</b> {rate.name}\n"
-                f"📅 <b>Дней добавлено:</b> {rate.days}\n"
-                f"💰 <b>Оплачено:</b> {amount}₽\n\n"
-                f"🖥 <b>Сервер:</b> {host.name}\n\n"
-                f"🔗 <b>Ваша VLESS ссылка (осталась без изменений):</b>\n"
+                f"<b>Подписка продлена</b>\n\n"
+                f"{rate.name} · +{rate.days} дн.\n"
+                f"{amount}₽\n\n"
+                f"Сервер: {host.name}\n"
+                f"Действует до: {new_date_str}\n\n"
                 f"<code>{existing_sub.vless_url}</code>"
             )
             
             await bot.send_message(user_id, success_text, parse_mode="HTML")
             
-            ic(f"Subscription extended for user {user_id}")
+            ic(f"Subscription extended for user {user_id}, new expiry: {new_expiry_date}")
             return True
         
+        # ======================================================================
+        # 6. НОВАЯ ПОДПИСКА (ПОКУПКА)
+        # ======================================================================
         else:
-            # ========== НОВАЯ ПОДПИСКА (ПОКУПКА) ==========
             ic(f"Processing NEW subscription for user {user_id}")
             
             def create_client_sync():
@@ -273,14 +295,14 @@ async def _process_successful_payment(
                 ic(f"Failed to create client on host {host.name}")
                 await bot.send_message(
                     user_id,
-                    "❌ <b>Ошибка активации подписки</b>\n\nНе удалось создать клиента на сервере.\n"
-                    "Свяжитесь с поддержкой: @hor1zon_support",
+                    "<b>Ошибка активации</b>\n\nНе удалось создать клиента.\n\nПоддержка: @Ilya_Nester0v",
                     parse_mode="HTML"
                 )
                 return False
             
             client_id = client_data.get("id")
             
+            # Получаем информацию для VLESS ссылки
             def get_inbound_sync():
                 client = XUIClient(host)
                 inbound = client.get_inbound_by_id(host.inbound_id)
@@ -324,13 +346,17 @@ async def _process_successful_payment(
                 ic("No vless_url generated")
                 return False
             
+            # Устанавливаем дату истечения
+            expires_at = datetime.now() + timedelta(days=rate.days)
+            
             await subscription_repo.create(
                 sub_id=client_id,
                 user_id=user.user_id,
                 host_id=host.host_id,
                 rate_id=rate.id,
                 vless_url=vless_url,
-                status=SubscriptionStatus.ACTIVE
+                status=SubscriptionStatus.ACTIVE,
+                expires_at=expires_at
             )
             
             payment.mark_as_paid()
@@ -338,18 +364,18 @@ async def _process_successful_payment(
             await session.commit()
             
             vless_text = (
-                f"🔗 <b>Ваша VLESS ссылка для подключения</b>\n\n"
-                f"📋 <b>Тариф:</b> {rate.name}\n"
-                f"📅 <b>Дней:</b> {rate.days}\n"
-                f"💰 <b>Оплачено:</b> {amount}₽\n"
-                f"🖥 <b>Сервер:</b> {host.name}\n\n"
+                f"<b>Horizon VPN</b>\n\n"
+                f"{rate.name} · {rate.days} дн.\n"
+                f"{amount}₽\n\n"
+                f"Сервер: {host.name}\n"
+                f"Действует до: {expires_at.strftime('%d.%m.%Y')}\n\n"
                 f"<code>{vless_url}</code>\n\n"
-                f"📌 <i>Нажмите на ссылку для копирования</i>"
+                f"Нажмите для копирования"
             )
             
             await bot.send_message(user_id, vless_text, parse_mode="HTML")
             
-            ic(f"New subscription created for user {user_id}")
+            ic(f"New subscription created for user {user_id}, expires at: {expires_at}")
             return True
         
     except Exception as e:
@@ -358,11 +384,9 @@ async def _process_successful_payment(
         
         await bot.send_message(
             user_id,
-            f"❌ <b>Ошибка активации подписки</b>\n\nВаш платёж подтверждён, но произошла ошибка.\n"
-            f"Свяжитесь с поддержкой: @hor1zon_support",
+            f"<b>Ошибка активации</b>\n\nПлатёж подтверждён, но произошла ошибка.\n\nПоддержка: @Ilya_Nester0v",
             parse_mode="HTML"
         )
         return False
     finally:
-        # Удаляем временные данные из Redis
         await redis.delete(f"payment:{user_id}")
