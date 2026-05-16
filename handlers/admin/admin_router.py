@@ -25,6 +25,7 @@ from aiogram import Router
 # -----------------------------------------------------------------------------
 # Admin Modules
 # -----------------------------------------------------------------------------
+from handlers.admin.admin_network import AdminNetworkRouter
 from handlers.admin.admin_panel import AdminPanelRouter
 from handlers.admin.admin_rates import AdminRatesRouter
 from handlers.admin.admin_hosts import AdminHostsRouter
@@ -44,6 +45,7 @@ AdminRouter.include_routers(
     AdminPanelRouter,
     AdminRatesRouter,
     AdminHostsRouter,
+    AdminNetworkRouter,
 )
 
 # =============================================================================

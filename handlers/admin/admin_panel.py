@@ -1,4 +1,3 @@
-# handlers/admin/admin_panel.py
 import os
 from typing import Union
 from aiogram import F, Router, types
@@ -57,10 +56,11 @@ async def _show_admin_panel(
     
     btns = {
         "📋 Тарифы": "admin_rates_set",
-        "🖥 Хосты": "admin_hosts_set"
+        "🖥 Хосты": "admin_hosts_set",
+        "🌐 Статус сети": "network_stats"  # Добавлена кнопка
     }
     
-    sizes = (1, 1)
+    sizes = (1, 1, 1)  # Изменено на 3 кнопки
     
     text = (
         "👑 <b>Панель администратора</b>\n\n"
