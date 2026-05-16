@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 from dotenv import find_dotenv, load_dotenv
@@ -23,6 +22,9 @@ import bot_instance
 
 # Импортируем фоновую задачу
 from tools import run_expiration_checker
+
+# Импортируем сервис мониторинга сети
+from services.network_monitor import init_network_monitor, stop_network_monitor
 
 
 # ======================================================================
@@ -69,12 +71,22 @@ async def on_startup(bot):
     # Запускаем фоновую задачу для проверки истекающих подписок
     asyncio.create_task(run_expiration_checker(session_maker, check_interval_hours=24))
     print("✅ Expiration checker started")
+    
+    # Запускаем мониторинг сети (проверка каждые 5 секунд)
+    await init_network_monitor(os.getenv("TOKEN"), check_interval=5)
+    print("✅ Network monitor service started")
 
 
 async def on_shutdown(bot: Bot):
     """Cleanup on bot shutdown"""
+    # Останавливаем мониторинг сети
+    await stop_network_monitor()
+    print("❌ Network monitor service stopped")
+    
+    # Отключаем Redis
     await redis_client.disconnect()
     print("❌ Redis disconnected")
+    
     print("❌ Bot stopped")
 
 
