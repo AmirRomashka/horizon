@@ -1,5 +1,4 @@
-# database/models/host_model.py
-from sqlalchemy import String, Integer, Boolean, Text
+from sqlalchemy import String, Integer, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.models.base_model import Base
@@ -14,6 +13,7 @@ class Hosts(Base):
     api_url: Mapped[str] = mapped_column(String(255), nullable=False)
     username: Mapped[str] = mapped_column(String(100), nullable=False)
     password: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_token: Mapped[str] = mapped_column(String(255), nullable=True, default="")  # НОВОЕ ПОЛЕ
     inbound_id: Mapped[int] = mapped_column(Integer, default=1)
     location: Mapped[str] = mapped_column(String(100), nullable=True)
     status: Mapped[HostStatus] = mapped_column(String(20), default=HostStatus.ACTIVE)
@@ -36,15 +36,11 @@ class Hosts(Base):
         return self.status == HostStatus.MAINTENANCE
 
     def get_web_base_url(self) -> str:
-        """Возвращает базовый URL с webBasePath (без panel)"""
+        """Возвращает базовый URL с webBasePath"""
         base = self.api_url.rstrip('/')
         if self.api_path:
             return f"{base}/{self.api_path.rstrip('/')}"
         return base
-
-    def get_login_url(self) -> str:
-        """URL для авторизации в API"""
-        return f"{self.get_web_base_url()}/login"
 
     def get_panel_api_url(self) -> str:
         """URL для panel API"""
@@ -68,25 +64,11 @@ class Hosts(Base):
     def get_client_traffic_url(self, client_email: str) -> str:
         return f"{self.get_panel_api_url()}/inbounds/getClientTraffics/{client_email}"
 
+    def get_client_traffic_by_uuid_url(self, client_uuid: str) -> str:
+        return f"{self.get_panel_api_url()}/inbounds/getClientTrafficsById/{client_uuid}"
+
     def get_reset_client_traffic_url(self, inbound_id: int, email: str) -> str:
         return f"{self.get_panel_api_url()}/inbounds/{inbound_id}/resetClientTraffic/{email}"
 
     def get_server_status_url(self) -> str:
         return f"{self.get_panel_api_url()}/server/status"
-    
-    # database/models/host_model.py (добавить методы)
-
-    def get_web_base_url(self) -> str:
-        """Возвращает базовый URL с webBasePath"""
-        base = self.api_url.rstrip('/')
-        if self.api_path:
-            return f"{base}/{self.api_path.rstrip('/')}"
-        return base
-
-    def get_login_url(self) -> str:
-        """URL для авторизации в API"""
-        return f"{self.get_web_base_url()}/login"
-
-    def get_panel_api_url(self) -> str:
-        """URL для panel API"""
-        return f"{self.get_web_base_url()}/panel/api"

@@ -1,4 +1,3 @@
-# handlers/admin/admin_hosts.py
 import asyncio
 from typing import Union
 from aiogram import F, Router, types
@@ -55,6 +54,7 @@ async def show_host_edit_form(
     
     available_text = "Да" if host.is_available() else "Нет"
     api_status = "✅ Online" if is_connected else f"❌ Offline: {connection_status}"
+    token_status = "✅ Есть" if host.api_token else "❌ Нет"
     
     text = (
         f"🖥 <b>Редактирование хоста</b>\n\n"
@@ -62,6 +62,7 @@ async def show_host_edit_form(
         f"🌍 <b>Локация:</b> {host.location or 'Не указана'}\n"
         f"🔗 <b>API URL:</b> <code>{host.api_url}</code>\n"
         f"🔧 <b>API Path:</b> <code>{host.api_path or 'xui/API'}</code>\n"
+        f"🔑 <b>API Token:</b> {token_status}\n"
         f"👤 <b>Username:</b> {host.username}\n"
         f"🔑 <b>Password:</b> {'*' * 10}\n"
         f"📡 <b>Inbound ID:</b> {host.inbound_id}\n"
@@ -77,6 +78,7 @@ async def show_host_edit_form(
         "🌍 Изменить локацию": f"admin_host_edit_location_{host.host_id}",
         "🔗 Изменить API URL": f"admin_host_edit_url_{host.host_id}",
         "🔧 Изменить API Path": f"admin_host_edit_api_path_{host.host_id}",
+        "🔑 Изменить API Token": f"admin_host_edit_api_token_{host.host_id}",
         "👤 Изменить username": f"admin_host_edit_username_{host.host_id}",
         "🔑 Изменить password": f"admin_host_edit_password_{host.host_id}",
         "📡 Изменить inbound_id": f"admin_host_edit_inbound_{host.host_id}",
@@ -179,6 +181,140 @@ async def edit_host(call: types.CallbackQuery, state: FSMContext, session: Async
     ic(f"Edit host: {host_id}")
     await show_host_edit_form(call, host_id, session, state)
 
+
+# =============================================================================
+# РЕДАКТИРОВАНИЕ API TOKEN
+# =============================================================================
+
+@AdminHostsRouter.callback_query(F.data.startswith("admin_host_edit_api_token_"))
+async def edit_host_api_token_start(call: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    host_id = int(call.data.split("_")[-1])
+    ic(f"Edit API token start: host_id={host_id}")
+    
+    await state.update_data(edit_host_id=host_id)
+    await state.set_state(AdminStates.admin_host_edit_api_token)
+    
+    host_repo = HostRepository(session)
+    host = await host_repo.get(host_id)
+    
+    current_token_status = "есть" if host and host.api_token else "отсутствует"
+    
+    await call.message.answer(
+        "🔑 Введите <b>API Token</b> для авторизации в 3x-ui:\n\n"
+        "📌 Где взять токен:\n"
+        "1. Войдите в админ-панель 3x-ui\n"
+        "2. Перейдите в Settings → Security\n"
+        "3. Создайте новый API Token (например, «horizon_bot»)\n"
+        "4. Скопируйте сгенерированный токен\n\n"
+        f"🔐 Текущий статус: {current_token_status}\n\n"
+        "⚠️ Отправьте «-» чтобы удалить токен\n"
+        "❌ Отмена: /cancel",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@AdminHostsRouter.message(StateFilter(AdminStates.admin_host_edit_api_token))
+async def edit_host_api_token_save(message: types.Message, state: FSMContext, session: AsyncSession):
+    api_token = message.text.strip()
+    ic(f"Edit API token save: token={'*' * len(api_token) if api_token else 'empty'}")
+    
+    data = await state.get_data()
+    host_id = data.get("edit_host_id")
+    
+    if not host_id:
+        await message.answer("❌ Ошибка: ID хоста не найден")
+        await state.clear()
+        return
+    
+    host_repo = HostRepository(session)
+    host = await host_repo.get(host_id)
+    
+    if not host:
+        await message.answer("❌ Хост не найден")
+        await state.clear()
+        return
+    
+    # Если "-" - удаляем токен
+    if api_token == "-":
+        api_token = None
+        await host_repo.update(host_id, api_token=api_token)
+        await session.commit()
+        await message.answer(f"✅ API Token удалён для хоста <b>{host.name}</b>", parse_mode="HTML")
+    elif api_token:
+        await host_repo.update(host_id, api_token=api_token)
+        await session.commit()
+        await message.answer(f"✅ API Token сохранён для хоста <b>{host.name}</b>", parse_mode="HTML")
+    else:
+        await message.answer("❌ Неверный формат. Отправьте токен или «-» для удаления")
+        return
+    
+    await state.clear()
+    await show_host_edit_form(message, host_id, session)
+
+
+# =============================================================================
+# РЕДАКТИРОВАНИЕ API PATH
+# =============================================================================
+
+@AdminHostsRouter.callback_query(F.data.startswith("admin_host_edit_api_path_"))
+async def edit_host_api_path_start(call: types.CallbackQuery, state: FSMContext):
+    host_id = int(call.data.split("_")[-1])
+    ic(f"Edit API path start: host_id={host_id}")
+    
+    await state.update_data(edit_host_id=host_id)
+    await state.set_state(AdminStates.admin_host_edit_api_path)
+    
+    await call.message.answer(
+        "🔧 Введите <b>новый путь к API</b>:\n\n"
+        "• <code>xui/API</code> - стандартный путь\n"
+        "• <code>panel/api</code> - для новых версий\n\n"
+        "📌 Оставьте пустым для значения по умолчанию",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@AdminHostsRouter.message(StateFilter(AdminStates.admin_host_edit_api_path))
+async def edit_host_api_path_save(message: types.Message, state: FSMContext, session: AsyncSession):
+    api_path = message.text.strip()
+    ic(f"Edit API path save: api_path={api_path}")
+    
+    if not api_path:
+        api_path = "xui/API"
+    
+    api_path = api_path.strip('/')
+    
+    data = await state.get_data()
+    host_id = data.get("edit_host_id")
+    ic(f"Edit API path: host_id={host_id}")
+    
+    if not host_id:
+        await message.answer("❌ Ошибка: ID хоста не найден")
+        await state.clear()
+        return
+    
+    host_repo = HostRepository(session)
+    host = await host_repo.get(host_id)
+    
+    if not host:
+        ic(f"Edit API path: host not found, host_id={host_id}")
+        await message.answer("❌ Хост не найден")
+        await state.clear()
+        return
+    
+    await host_repo.update(host_id, api_path=api_path)
+    await session.commit()
+    ic(f"Edit API path: updated host_id={host_id}")
+    
+    await message.answer(f"✅ Путь API изменён на: <code>{api_path}</code>", parse_mode="HTML")
+    await state.clear()
+    await show_host_edit_form(message, host_id, session)
+
+
+# =============================================================================
+# ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (ПРОВЕРКА API, СИНХРОНИЗАЦИЯ, СТАТУС, УДАЛЕНИЕ)
+# =============================================================================
 
 @AdminHostsRouter.callback_query(F.data.startswith("admin_host_check_api_"))
 async def check_host_api(call: types.CallbackQuery, session: AsyncSession):
@@ -422,13 +558,53 @@ async def create_host_get_api_path(message: types.Message, state: FSMContext):
     api_path = api_path.strip('/')
     
     await state.update_data(host_api_path=api_path)
-    await state.set_state(AdminStates.admin_host_create_username)
+    await state.set_state(AdminStates.admin_host_create_api_token)
     
     await message.answer(
         f"✅ Путь API: <code>{api_path}</code>\n\n"
-        "👤 Введите <b>username</b> для авторизации в панели 3x-ui:",
+        "🔑 Введите <b>API Token</b> для авторизации в панели 3x-ui:\n\n"
+        "📌 Где взять токен:\n"
+        "1. Войдите в админ-панель 3x-ui\n"
+        "2. Перейдите в Settings → Security\n"
+        "3. Создайте новый API Token (например, «horizon_bot»)\n"
+        "4. Скопируйте сгенерированный токен\n\n"
+        "💡 <b>Это поле НЕ обязательно</b>. Если оставить пустым, будет использоваться логин/пароль.\n"
+        "⚠️ Отправьте «-» чтобы пропустить\n"
+        "❌ Отмена: /cancel",
         parse_mode="HTML"
     )
+
+
+@AdminHostsRouter.message(StateFilter(AdminStates.admin_host_create_api_token))
+async def create_host_get_api_token(message: types.Message, state: FSMContext):
+    api_token = message.text.strip()
+    ic(f"Create host: API token={'*' * len(api_token) if api_token else 'empty'}")
+    
+    # Если "-", значит пропускаем (оставляем пустой)
+    if api_token == "-":
+        api_token = None
+    elif api_token == "":
+        api_token = None
+    
+    await state.update_data(host_api_token=api_token)
+    await state.set_state(AdminStates.admin_host_create_username)
+    
+    if api_token:
+        await message.answer(
+            f"✅ API Token сохранён\n\n"
+            "👤 Введите <b>username</b> для авторизации в панели 3x-ui:\n"
+            "📌 Обычно admin\n"
+            "❌ Отмена: /cancel",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "⚠️ API Token не указан. Будет использоваться авторизация по логину/паролю.\n\n"
+            "👤 Введите <b>username</b> для авторизации в панели 3x-ui:\n"
+            "📌 Обычно admin\n"
+            "❌ Отмена: /cancel",
+            parse_mode="HTML"
+        )
 
 
 @AdminHostsRouter.message(StateFilter(AdminStates.admin_host_create_username))
@@ -445,7 +621,8 @@ async def create_host_get_username(message: types.Message, state: FSMContext):
     
     await message.answer(
         f"✅ Username: <b>{username}</b>\n\n"
-        "🔑 Введите <b>password</b> для авторизации в панели 3x-ui:",
+        "🔑 Введите <b>password</b> для авторизации в панели 3x-ui:\n"
+        "❌ Отмена: /cancel",
         parse_mode="HTML"
     )
 
@@ -465,7 +642,8 @@ async def create_host_get_password(message: types.Message, state: FSMContext):
     await message.answer(
         f"✅ Password: <b>{'*' * len(password)}</b>\n\n"
         "📡 Введите <b>inbound_id</b> (обычно 1):\n"
-        "📌 Пример: 1, 2, 3",
+        "📌 Пример: 1, 2, 3\n"
+        "❌ Отмена: /cancel",
         parse_mode="HTML"
     )
 
@@ -486,7 +664,8 @@ async def create_host_get_inbound_id(message: types.Message, state: FSMContext):
         await message.answer(
             f"✅ inbound_id: <b>{inbound_id}</b>\n\n"
             "📊 Введите <b>max_clients</b> (максимальное количество клиентов на хосте):\n"
-            "📌 Пример: 100, 200, 500",
+            "📌 Пример: 100, 200, 500\n"
+            "❌ Отмена: /cancel",
             parse_mode="HTML"
         )
         
@@ -518,6 +697,7 @@ async def create_host_get_max_clients(message: types.Message, state: FSMContext,
             name=data.get("host_name"),
             api_url=data.get("host_api_url"),
             api_path=data.get("host_api_path", "xui/API"),
+            api_token=data.get("host_api_token"),
             username=data.get("host_username"),
             password=data.get("host_password"),
             inbound_id=data.get("host_inbound_id", 1),
@@ -540,7 +720,8 @@ async def create_host_get_max_clients(message: types.Message, state: FSMContext,
             await status_msg.edit_text(
                 f"❌ <b>Ошибка подключения к API</b>\n\n"
                 f"{connection_message}\n\n"
-                f"Проверьте данные и попробуйте снова.",
+                f"Проверьте данные и попробуйте снова.\n\n"
+                f"💡 Совет: используйте API Token вместо логина/пароля",
                 parse_mode="HTML"
             )
             return
@@ -552,6 +733,7 @@ async def create_host_get_max_clients(message: types.Message, state: FSMContext,
             name=data.get("host_name"),
             api_url=data.get("host_api_url"),
             api_path=data.get("host_api_path", "xui/API"),
+            api_token=data.get("host_api_token"),
             username=data.get("host_username"),
             password=data.get("host_password"),
             inbound_id=data.get("host_inbound_id", 1),
@@ -570,6 +752,7 @@ async def create_host_get_max_clients(message: types.Message, state: FSMContext,
             f"🌍 Локация: {host.location or 'Не указана'}\n"
             f"🔗 API URL: <code>{host.api_url}</code>\n"
             f"🔧 API Path: <code>{host.api_path}</code>\n"
+            f"🔑 API Token: {'✅ Есть' if host.api_token else '❌ Нет'}\n"
             f"👤 Username: {host.username}\n"
             f"📡 inbound_id: {host.inbound_id}\n"
             f"📊 max_clients: {host.max_clients}\n"
@@ -591,59 +774,16 @@ async def create_host_get_max_clients(message: types.Message, state: FSMContext,
 
 
 # =============================================================================
-# РЕДАКТИРОВАНИЕ API PATH
+# ОБРАБОТЧИК ОТМЕНЫ
 # =============================================================================
 
-@AdminHostsRouter.callback_query(F.data.startswith("admin_host_edit_api_path_"))
-async def edit_host_api_path_start(call: types.CallbackQuery, state: FSMContext):
-    host_id = int(call.data.split("_")[-1])
-    ic(f"Edit API path start: host_id={host_id}")
+@AdminHostsRouter.message(F.text == "/cancel")
+async def cancel_action(message: types.Message, state: FSMContext):
+    ic("Cancel action")
+    current_state = await state.get_state()
     
-    await state.update_data(edit_host_id=host_id)
-    await state.set_state(AdminStates.admin_host_edit_api_path)
-    
-    await call.message.answer(
-        "🔧 Введите <b>новый путь к API</b>:\n\n"
-        "• <code>xui/API</code> - стандартный путь\n"
-        "• <code>panel/api</code> - для новых версий\n\n"
-        "📌 Оставьте пустым для значения по умолчанию",
-        parse_mode="HTML"
-    )
-    await call.answer()
-
-
-@AdminHostsRouter.message(StateFilter(AdminStates.admin_host_edit_api_path))
-async def edit_host_api_path_save(message: types.Message, state: FSMContext, session: AsyncSession):
-    api_path = message.text.strip()
-    ic(f"Edit API path save: api_path={api_path}")
-    
-    if not api_path:
-        api_path = "xui/API"
-    
-    api_path = api_path.strip('/')
-    
-    data = await state.get_data()
-    host_id = data.get("edit_host_id")
-    ic(f"Edit API path: host_id={host_id}")
-    
-    if not host_id:
-        await message.answer("❌ Ошибка: ID хоста не найден")
+    if current_state and current_state.startswith("AdminStates.admin_host"):
         await state.clear()
-        return
-    
-    host_repo = HostRepository(session)
-    host = await host_repo.get(host_id)
-    
-    if not host:
-        ic(f"Edit API path: host not found, host_id={host_id}")
-        await message.answer("❌ Хост не найден")
-        await state.clear()
-        return
-    
-    await host_repo.update(host_id, api_path=api_path)
-    await session.commit()
-    ic(f"Edit API path: updated host_id={host_id}")
-    
-    await message.answer(f"✅ Путь API изменён на: <code>{api_path}</code>", parse_mode="HTML")
-    await state.clear()
-    await show_host_edit_form(message, host_id, session)
+        await message.answer("✅ Действие отменено\n\nИспользуйте /panel для входа в админ-панель")
+    else:
+        await message.answer("❌ Нет активного действия для отмены")
